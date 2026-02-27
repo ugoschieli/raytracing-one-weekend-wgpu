@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use egui_wgpu::RendererOptions;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -15,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 struct App {
     window: Option<Arc<Window>>,
     device: Option<wgpu::Device>,
@@ -24,10 +25,15 @@ struct App {
     surface_config: Option<wgpu::SurfaceConfiguration>,
 
     compute_pipeline: Option<wgpu::ComputePipeline>,
-    render_pipeline: Option<wgpu::RenderPipeline>,
-
     compute_bind_group: Option<wgpu::BindGroup>,
+    render_pipeline: Option<wgpu::RenderPipeline>,
     render_bind_group: Option<wgpu::BindGroup>,
+
+    egui_state: Option<egui_winit::State>,
+    egui_renderer: Option<egui_wgpu::Renderer>,
+
+    last_frame_time: Option<std::time::Instant>,
+    fps: f32,
 }
 
 impl App {
@@ -49,13 +55,14 @@ impl App {
 
         let surface = instance.create_surface(self.window.as_ref().unwrap().clone())?;
 
-        let surface_config = surface
+        let mut surface_config = surface
             .get_default_config(
                 &adapter,
                 self.window.as_ref().unwrap().inner_size().width,
                 self.window.as_ref().unwrap().inner_size().height,
             )
             .unwrap();
+        surface_config.present_mode = wgpu::PresentMode::Fifo;
         log::info!("Surface config: {:#?}", surface_config);
         surface.configure(&device, &surface_config);
 
@@ -107,7 +114,7 @@ impl App {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Compute Pipeline Layout"),
                 bind_group_layouts: &[&compute_bind_group_layout],
-                immediate_size: 0,
+                push_constant_ranges: &[],
             });
 
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -156,7 +163,7 @@ impl App {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
                 bind_group_layouts: &[&render_bind_group_layout],
-                immediate_size: 0,
+                push_constant_ranges: &[],
             });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -193,7 +200,7 @@ impl App {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview_mask: None,
+            multiview: None,
             cache: None,
         });
 
@@ -215,22 +222,88 @@ impl App {
         self.device = Some(device);
         self.queue = Some(queue);
         self.surface = Some(surface);
+
+        let context = egui::Context::default();
+        let viewport_id = context.viewport_id();
+        let egui_state = egui_winit::State::new(
+            context,
+            viewport_id,
+            self.window.as_ref().unwrap(),
+            Some(self.window.as_ref().unwrap().scale_factor() as f32),
+            None,
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(
+            self.device.as_ref().unwrap(),
+            surface_config.format,
+            RendererOptions {
+                ..Default::default()
+            },
+        );
+
+        self.egui_state = Some(egui_state);
+        self.egui_renderer = Some(egui_renderer);
+
         self.surface_config = Some(surface_config);
 
         self.compute_pipeline = Some(compute_pipeline);
-        self.render_pipeline = Some(render_pipeline);
         self.compute_bind_group = Some(compute_bind_group);
+        self.render_pipeline = Some(render_pipeline);
         self.render_bind_group = Some(render_bind_group);
+
+        self.last_frame_time = Some(std::time::Instant::now());
 
         Ok(())
     }
 
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let output = self.surface.as_ref().unwrap().get_current_texture()?;
+        let output = match self.surface.as_ref().unwrap().get_current_texture() {
+            Ok(surface) => surface,
+            Err(wgpu::SurfaceError::Outdated) => {
+                log::warn!("Surface is outdated");
+                return Ok(());
+            }
+            Err(e) => return Err(Box::new(e)),
+        };
+
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // FPS Calculation
+        if let Some(last_time) = self.last_frame_time {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(last_time).as_millis() as f32;
+            self.fps = 1000.0 / elapsed;
+            self.last_frame_time = Some(now);
+        }
+
+        // Egui Frame Update
+        let raw_input = self
+            .egui_state
+            .as_mut()
+            .unwrap()
+            .take_egui_input(self.window.as_ref().unwrap());
+
+        let full_output = self
+            .egui_state
+            .as_mut()
+            .unwrap()
+            .egui_ctx()
+            .run(raw_input, |ctx| {
+                egui::Window::new("Stats").show(ctx, |ui| {
+                    ui.label(format!("FPS: {:.1}", self.fps));
+                });
+            });
+
+        let clipped_primitives = self
+            .egui_state
+            .as_mut()
+            .unwrap()
+            .egui_ctx()
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+
+        // We only use one encoder for everything to avoid lifetime complexites
         let mut encoder =
             self.device
                 .as_ref()
@@ -238,6 +311,32 @@ impl App {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Render Encoder"),
                 });
+
+        // Update Egui buffers
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [
+                self.surface_config.as_ref().unwrap().width,
+                self.surface_config.as_ref().unwrap().height,
+            ],
+            pixels_per_point: self.window.as_ref().unwrap().scale_factor() as f32,
+        };
+
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer.as_mut().unwrap().update_texture(
+                self.device.as_ref().unwrap(),
+                self.queue.as_ref().unwrap(),
+                *id,
+                image_delta,
+            );
+        }
+
+        self.egui_renderer.as_mut().unwrap().update_buffers(
+            self.device.as_ref().unwrap(),
+            self.queue.as_ref().unwrap(),
+            &mut encoder,
+            &clipped_primitives,
+            &screen_descriptor,
+        );
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -271,18 +370,29 @@ impl App {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                multiview_mask: None,
-                occlusion_query_set: None,
                 timestamp_writes: None,
+                occlusion_query_set: None,
             });
 
             render_pass.set_pipeline(self.render_pipeline.as_ref().unwrap());
             render_pass.set_bind_group(0, self.render_bind_group.as_ref().unwrap(), &[]);
             render_pass.draw(0..3, 0..1);
+
+            // Draw egui
+            self.egui_renderer.as_mut().unwrap().render(
+                &mut render_pass.forget_lifetime(),
+                &clipped_primitives,
+                &screen_descriptor,
+            );
         }
 
         self.queue.as_ref().unwrap().submit(Some(encoder.finish()));
         output.present();
+
+        // Cleanup egui textures
+        for x in &full_output.textures_delta.free {
+            self.egui_renderer.as_mut().unwrap().free_texture(x);
+        }
 
         Ok(())
     }
@@ -311,6 +421,16 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if let Some(egui_state) = self.egui_state.as_mut() {
+            let response = egui_state.on_window_event(self.window.as_ref().unwrap(), &event);
+            if response.repaint {
+                self.window.as_ref().unwrap().request_redraw();
+            }
+            if response.consumed {
+                return;
+            }
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
