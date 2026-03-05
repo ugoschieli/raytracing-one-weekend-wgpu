@@ -8,7 +8,7 @@ struct Uniforms {
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
 const SAMPLE_PER_PIXEL: u32 = 10;
-const MAX_DEPTH = 10;
+const MAX_DEPTH = 5;
 const PIXEL_SAMPLE_SCALE: f32 = 1.0 / f32(SAMPLE_PER_PIXEL); 
 
 struct Rand {
@@ -33,6 +33,7 @@ struct Ray {
 struct HitRecord {
     p: vec3<f32>,
     normal: vec3<f32>,
+    mat: Material,
     t: f32,
     front_face: bool,
 }
@@ -40,7 +41,18 @@ struct HitRecord {
 struct Sphere {
     center: vec3<f32>,
     radius: f32,
+    mat: Material,
 }
+
+struct Material {
+    mat_type: MaterialType,
+    albedo: vec3<f32>,
+    fuzz: f32, // only useful for metal
+}
+
+alias MaterialType = u32;
+const MAT_LAMBERTIAN: u32 = 0;
+const MAT_METAL: u32 = 1;
 
 fn pcg_hash(input: u32) -> u32 {
     var state = input * 747796405u + 2891336453u;
@@ -92,6 +104,41 @@ fn random_on_hemisphere(r: ptr<function, Rand>, normal: vec3<f32>) -> vec3<f32> 
     }
 }
 
+fn linear_to_gamma(linear_component: f32) -> f32 {
+    if (linear_component > 0) {
+        return sqrt(linear_component);
+    }
+
+    return 0;
+}
+
+fn near_zero(e: vec3<f32>) -> bool {
+    // Return true if the vector is close to zero in all dimensions.
+    let s = 1e-8;
+    return (abs(e[0]) < s) && (abs(e[1]) < s) && (abs(e[2]) < s);
+}
+
+fn lambert_scatter(mat: Material, rand: ptr<function, Rand>, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
+    var scatter_direction = rec.normal + random_unit_vector(rand);
+
+    // Catch degenerate scatter direction
+    if (near_zero(scatter_direction)) {
+        scatter_direction = rec.normal;
+    }
+
+    (*scattered) = Ray(rec.p, scatter_direction);
+    (*attenuation) = mat.albedo;
+    return true;
+}
+
+fn metal_scatter(mat: Material, rand: ptr<function, Rand>, r_in: Ray, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
+        var reflected = reflect(r_in.dir, rec.normal);
+        reflected = normalize(reflected) + (mat.fuzz * random_unit_vector(rand));
+        (*scattered) = Ray(rec.p, reflected);
+        (*attenuation) = mat.albedo;
+        return (dot((*scattered).dir, rec.normal) > 0);
+}
+
 fn new_camera(dimensions: vec2<u32>) -> Camera {
     let image_width = dimensions.x;
     let image_height = dimensions.y;
@@ -120,8 +167,6 @@ fn new_camera(dimensions: vec2<u32>) -> Camera {
 }
 
 fn render(cam: Camera, global_id: vec3<u32>, rand: ptr<function, Rand>) {
-    // let pixel_center = cam.pixel00_loc + (f32(global_id.x) * cam.pixel_delta_u) + (f32(global_id.y) * cam.pixel_delta_v);
-    // let ray_direction = pixel_center - cam.center;
     var pixel_color = vec3<f32>();
 
     for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
@@ -131,6 +176,15 @@ fn render(cam: Camera, global_id: vec3<u32>, rand: ptr<function, Rand>) {
 
     
     pixel_color *= PIXEL_SAMPLE_SCALE;
+
+    pixel_color.r = linear_to_gamma(pixel_color.r);
+    pixel_color.g = linear_to_gamma(pixel_color.g);
+    pixel_color.b = linear_to_gamma(pixel_color.b);
+
+    pixel_color.r = clamp(pixel_color.r, 0, 0.999);
+    pixel_color.g = clamp(pixel_color.g, 0, 0.999);
+    pixel_color.b = clamp(pixel_color.b, 0, 0.999);
+
     textureStore(tex, vec2<i32>(global_id.xy), vec4<f32>(pixel_color, 1));
 }
 
@@ -158,6 +212,7 @@ fn hit_sphere(s: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function
 
     (*rec).t = root;
     (*rec).p = ray_at(r, (*rec).t);
+    (*rec).mat = s.mat;
     let outward_normal = ((*rec).p - s.center) / s.radius;
     set_face_normal(rec, r, outward_normal);
 
@@ -188,8 +243,13 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
 }
 
 fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
-    let world = array(Sphere(vec3<f32>(0, 0, -1), 0.5), Sphere(vec3<f32>(0, -100.5, -1), 100));
-    let world_size: u32 = 2;
+    let world = array(
+        Sphere(vec3<f32>(0, -100.5, -1), 100, Material(MAT_LAMBERTIAN, vec3<f32>(0.8, 0.8, 0.0), 0)),
+        Sphere(vec3<f32>(0, 0, -1.2), 0.5, Material(MAT_LAMBERTIAN, vec3<f32>(0.1, 0.2, 0.5), 0)),
+        Sphere(vec3<f32>(-1, 0, -1), 0.5, Material(MAT_METAL, vec3<f32>(0.8, 0.8, 0.8), 0.3)),
+        Sphere(vec3<f32>(1, 0, -1), 0.5, Material(MAT_METAL, vec3<f32>(0.8, 0.6, 0.2), 1.0)),
+    );
+    let world_size: u32 = 4;
     var stop = false;
     var depth = 0;
 
@@ -214,15 +274,30 @@ fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
         }
 
         if (hit_anything) {
-            let direction = random_on_hemisphere(rand, rec.normal);
-            r = Ray(rec.p, direction);
-            final_color *=  0.5;
+            if (depth == MAX_DEPTH) {
+                final_color = vec3<f32>();
+            }
+            var not_absorbed: bool;
+            var scattered = Ray();
+            var attenuation = vec3<f32>();
+            switch rec.mat.mat_type {
+                case MAT_LAMBERTIAN: {
+                                         not_absorbed = lambert_scatter(rec.mat, rand, rec, &attenuation, &scattered);
+                                     }
+                case MAT_METAL: {
+                                    not_absorbed = metal_scatter(rec.mat, rand, r, rec, &attenuation, &scattered);
+                                }
+                default: {}
+            }
+            if (not_absorbed) {
+                r = scattered;
+                final_color *=  attenuation;
+            } else {
+                final_color = vec3<f32>();
+                stop = true;
+            }
         } else {
             stop = true;
-        }
-
-        if (depth == MAX_DEPTH) {
-            final_color = vec3<f32>();
         }
         depth += 1;
     }

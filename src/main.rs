@@ -5,6 +5,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::{Fullscreen, Window, WindowId};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -446,7 +447,8 @@ impl ApplicationHandler for App {
                         Window::default_attributes()
                             .with_title("Ray Tracing")
                             // .with_inner_size(PhysicalSize::new(600, 400)),
-                            .with_fullscreen(Some(Fullscreen::Borderless(None))),
+                            .with_fullscreen(Some(Fullscreen::Borderless(None)))
+                            .with_borderless_game(true),
                     )
                     .unwrap(),
             ));
