@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use egui_wgpu::RendererOptions;
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowId};
@@ -26,6 +27,7 @@ struct App {
 
     compute_pipeline: Option<wgpu::ComputePipeline>,
     compute_bind_group: Option<wgpu::BindGroup>,
+    time_buffer: Option<wgpu::Buffer>,
     render_pipeline: Option<wgpu::RenderPipeline>,
     render_bind_group: Option<wgpu::BindGroup>,
 
@@ -95,20 +97,39 @@ impl App {
             ..Default::default()
         });
 
+        let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Time Buffer"),
+            size: 4,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Compute pipeline
         let compute_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Compute Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         let compute_pipeline_layout =
@@ -130,10 +151,16 @@ impl App {
         let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Compute Bind Group"),
             layout: &compute_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&texture_view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: time_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         // Render pipeline
@@ -249,6 +276,7 @@ impl App {
 
         self.compute_pipeline = Some(compute_pipeline);
         self.compute_bind_group = Some(compute_bind_group);
+        self.time_buffer = Some(time_buffer);
         self.render_pipeline = Some(render_pipeline);
         self.render_bind_group = Some(render_bind_group);
 
@@ -339,6 +367,16 @@ impl App {
             &screen_descriptor,
         );
 
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f32();
+        self.queue.as_ref().unwrap().write_buffer(
+            self.time_buffer.as_ref().unwrap(),
+            0,
+            &time.to_ne_bytes(),
+        );
+
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Compute Pass"),
@@ -407,7 +445,7 @@ impl ApplicationHandler for App {
                     .create_window(
                         Window::default_attributes()
                             .with_title("Ray Tracing")
-                            // .with_inner_size(PhysicalSize::new(256, 256))
+                            // .with_inner_size(PhysicalSize::new(600, 400)),
                             .with_fullscreen(Some(Fullscreen::Borderless(None))),
                     )
                     .unwrap(),
