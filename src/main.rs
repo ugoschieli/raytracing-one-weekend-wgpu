@@ -62,6 +62,7 @@ impl App {
                 self.window.as_ref().unwrap().inner_size().height,
             )
             .unwrap();
+        surface_config.format = wgpu::TextureFormat::Bgra8Unorm;
         surface_config.present_mode = wgpu::PresentMode::Fifo;
         log::info!("Surface config: {:#?}", surface_config);
         surface.configure(&device, &surface_config);
@@ -406,6 +407,7 @@ impl ApplicationHandler for App {
                     .create_window(
                         Window::default_attributes()
                             .with_title("Ray Tracing")
+                            // .with_inner_size(PhysicalSize::new(256, 256))
                             .with_fullscreen(Some(Fullscreen::Borderless(None))),
                     )
                     .unwrap(),
