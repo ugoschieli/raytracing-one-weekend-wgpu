@@ -328,10 +328,7 @@ fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
     var depth = 0;
 
     var r = base_ray;
-
-    let unit_direction = normalize(r.dir);
-    let a = 0.5 * (unit_direction.y + 1.0);
-    var final_color = (1.0 - a) * vec3<f32>(1.0, 1.0, 1.0) + a * vec3<f32>(0.5, 0.7, 1.0);
+    var cur_attenuation = vec3<f32>(1.0, 1.0, 1.0);
 
     while (!stop && depth <= MAX_DEPTH) {
         var rec = HitRecord();
@@ -349,15 +346,15 @@ fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
 
         if (hit_anything) {
             if (depth == MAX_DEPTH) {
-                final_color = vec3<f32>();
+                cur_attenuation = vec3<f32>();
             }
             var scattered = Ray();
             var attenuation = vec3<f32>();
             if (mat_scatter(rand, r, rec, &attenuation, &scattered)) {
                 r = scattered;
-                final_color *=  attenuation;
+                cur_attenuation *= attenuation;
             } else {
-                final_color = vec3<f32>();
+                cur_attenuation = vec3<f32>();
                 stop = true;
             }
         } else {
@@ -365,6 +362,10 @@ fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
         }
         depth += 1;
     }
+
+    let unit_direction = normalize(r.dir);
+    let a = 0.5 * (unit_direction.y + 1.0);
+    var final_color = cur_attenuation * ((1.0 - a) * vec3<f32>(1.0, 1.0, 1.0) + a * vec3<f32>(0.5, 0.7, 1.0));
 
     return final_color;
 }
