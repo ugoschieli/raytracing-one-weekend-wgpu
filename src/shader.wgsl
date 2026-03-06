@@ -7,8 +7,8 @@ struct Uniforms {
 
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
-const SAMPLE_PER_PIXEL: u32 = 10;
-const MAX_DEPTH = 5;
+const SAMPLE_PER_PIXEL: u32 = 100;
+const MAX_DEPTH = 50;
 const PIXEL_SAMPLE_SCALE: f32 = 1.0 / f32(SAMPLE_PER_PIXEL); 
 
 struct Rand {
@@ -48,11 +48,105 @@ struct Material {
     mat_type: MaterialType,
     albedo: vec3<f32>,
     fuzz: f32, // only useful for metal
+    refraction_index: f32, // only useful for dielectrics
+}
+
+fn Lambertian(albedo: vec3<f32>) -> Material {
+    return Material(MAT_LAMBERTIAN, albedo, 0, 0);
+}
+
+fn Metal(albedo: vec3<f32>, fuzz: f32) -> Material {
+    return Material(MAT_METAL, albedo, clamp(fuzz, 0.0, 1.0), 0);
+}
+
+fn Dielectric(refraction_index: f32) -> Material {
+    return Material(MAT_DIELECTRIC, vec3(), 0, refraction_index);
+}
+
+fn mat_scatter(rand: ptr<function, Rand>, r_in: Ray, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
+    switch rec.mat.mat_type {
+        case MAT_LAMBERTIAN: {
+                                 return lambert_scatter(rand, rec, attenuation, scattered);
+                             }
+        case MAT_METAL: {
+                            return metal_scatter(rand, rec, r_in, attenuation, scattered);
+                        }
+        case MAT_DIELECTRIC: {
+                                 return dielectric_scatter(rand, rec, r_in, attenuation, scattered);
+                             }
+        default: {
+                     return false;
+                 }
+    }
+}
+
+fn lambert_scatter(rand: ptr<function, Rand>, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
+    var scatter_direction = rec.normal + random_unit_vector(rand);
+
+    // Catch degenerate scatter direction
+    if (near_zero(scatter_direction)) {
+        scatter_direction = rec.normal;
+    }
+
+    (*scattered) = Ray(rec.p, scatter_direction);
+    (*attenuation) = rec.mat.albedo;
+    return true;
+}
+
+fn metal_scatter(rand: ptr<function, Rand>, rec: HitRecord, r_in: Ray, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
+        var reflected = reflect(r_in.dir, rec.normal);
+        reflected = normalize(reflected) + (rec.mat.fuzz * random_unit_vector(rand));
+        (*scattered) = Ray(rec.p, reflected);
+        (*attenuation) = rec.mat.albedo;
+        return (dot((*scattered).dir, rec.normal) > 0);
+}
+
+fn dielectric_scatter(rand: ptr<function, Rand>, rec: HitRecord, r_in: Ray, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
+    (*attenuation) = vec3<f32>(1.0, 1.0, 1.0);
+    var ri: f32;
+    if (rec.front_face) { 
+        ri = (1.0 / rec.mat.refraction_index);
+    } else { 
+        ri = rec.mat.refraction_index;
+    };
+
+    let unit_direction = normalize(r_in.dir);
+    let cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+    let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+    let cannot_refract = ri * sin_theta > 1.0;
+    var direction: vec3<f32>;
+
+    if (cannot_refract || reflectance(cos_theta, ri) > rand_f32(rand)) {
+        direction = reflect(unit_direction, rec.normal);
+    }
+    else
+    {
+        direction = refract(unit_direction, rec.normal, ri);
+    }
+
+    (*scattered) = Ray(rec.p, direction);
+    return true;
+}
+
+fn refract_v2(uv: vec3<f32>, n: vec3<f32>, etai_over_etat: f32) -> vec3<f32> {
+    let cos_theta = min(dot(-uv, n), 1.0);
+    let r_out_perp =  etai_over_etat * (uv + cos_theta*n);
+    let r_out_parallel = -sqrt(abs(1.0 - dot(r_out_perp, r_out_perp))) * n;
+    return r_out_perp + r_out_parallel;
+}
+
+fn reflectance(cosine: f32, refraction_index: f32) -> f32 {
+    // Use Schlick's approximation for reflectance.
+    var r0 = (1 - refraction_index) / (1 + refraction_index);
+    r0 = r0 * r0;
+    return r0 + (1 - r0) * pow((1 - cosine), 5);
 }
 
 alias MaterialType = u32;
-const MAT_LAMBERTIAN: u32 = 0;
-const MAT_METAL: u32 = 1;
+const MAT_LAMBERTIAN: MaterialType = 0;
+const MAT_METAL: MaterialType = 1;
+const MAT_DIELECTRIC: MaterialType = 2;
 
 fn pcg_hash(input: u32) -> u32 {
     var state = input * 747796405u + 2891336453u;
@@ -116,27 +210,6 @@ fn near_zero(e: vec3<f32>) -> bool {
     // Return true if the vector is close to zero in all dimensions.
     let s = 1e-8;
     return (abs(e[0]) < s) && (abs(e[1]) < s) && (abs(e[2]) < s);
-}
-
-fn lambert_scatter(mat: Material, rand: ptr<function, Rand>, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
-    var scatter_direction = rec.normal + random_unit_vector(rand);
-
-    // Catch degenerate scatter direction
-    if (near_zero(scatter_direction)) {
-        scatter_direction = rec.normal;
-    }
-
-    (*scattered) = Ray(rec.p, scatter_direction);
-    (*attenuation) = mat.albedo;
-    return true;
-}
-
-fn metal_scatter(mat: Material, rand: ptr<function, Rand>, r_in: Ray, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
-        var reflected = reflect(r_in.dir, rec.normal);
-        reflected = normalize(reflected) + (mat.fuzz * random_unit_vector(rand));
-        (*scattered) = Ray(rec.p, reflected);
-        (*attenuation) = mat.albedo;
-        return (dot((*scattered).dir, rec.normal) > 0);
 }
 
 fn new_camera(dimensions: vec2<u32>) -> Camera {
@@ -244,12 +317,13 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
 
 fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
     let world = array(
-        Sphere(vec3<f32>(0, -100.5, -1), 100, Material(MAT_LAMBERTIAN, vec3<f32>(0.8, 0.8, 0.0), 0)),
-        Sphere(vec3<f32>(0, 0, -1.2), 0.5, Material(MAT_LAMBERTIAN, vec3<f32>(0.1, 0.2, 0.5), 0)),
-        Sphere(vec3<f32>(-1, 0, -1), 0.5, Material(MAT_METAL, vec3<f32>(0.8, 0.8, 0.8), 0.3)),
-        Sphere(vec3<f32>(1, 0, -1), 0.5, Material(MAT_METAL, vec3<f32>(0.8, 0.6, 0.2), 1.0)),
+        Sphere(vec3<f32>(0, -100.5, -1), 100, Lambertian(vec3<f32>(0.8, 0.8, 0.0))),
+        Sphere(vec3<f32>(0, 0, -1.2), 0.5, Lambertian(vec3<f32>(0.1, 0.2, 0.5))),
+        Sphere(vec3<f32>(-1, 0, -1), 0.5, Dielectric(1.50)),
+        Sphere(vec3<f32>(-1, 0, -1), 0.4, Dielectric(1.0 / 1.50)),
+        Sphere(vec3<f32>(1, 0, -1), 0.5, Metal(vec3<f32>(0.8, 0.6, 0.2), 0.3)),
     );
-    let world_size: u32 = 4;
+    let world_size: u32 = 5;
     var stop = false;
     var depth = 0;
 
@@ -277,19 +351,9 @@ fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
             if (depth == MAX_DEPTH) {
                 final_color = vec3<f32>();
             }
-            var not_absorbed: bool;
             var scattered = Ray();
             var attenuation = vec3<f32>();
-            switch rec.mat.mat_type {
-                case MAT_LAMBERTIAN: {
-                                         not_absorbed = lambert_scatter(rec.mat, rand, rec, &attenuation, &scattered);
-                                     }
-                case MAT_METAL: {
-                                    not_absorbed = metal_scatter(rec.mat, rand, r, rec, &attenuation, &scattered);
-                                }
-                default: {}
-            }
-            if (not_absorbed) {
+            if (mat_scatter(rand, r, rec, &attenuation, &scattered)) {
                 r = scattered;
                 final_color *=  attenuation;
             } else {
