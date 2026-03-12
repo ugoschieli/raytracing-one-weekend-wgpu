@@ -2,12 +2,15 @@
 
 struct Uniforms {
     time: f32,
+    frame: u32,
 }
 @group(0) @binding(1) var<uniform> uniforms: Uniforms;
 
+@group(0) @binding(2) var accum_tex: texture_storage_2d<rgba32float, read_write>;
+
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
-const SAMPLE_PER_PIXEL: u32 = 100;
+const SAMPLE_PER_PIXEL: u32 = 1;
 const MAX_DEPTH = 50;
 const PIXEL_SAMPLE_SCALE: f32 = 1.0 / f32(SAMPLE_PER_PIXEL); 
 
@@ -391,11 +394,38 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // starting seed, preventing overlapping sequences across adjacent pixels.
     var seed = pcg_hash(global_id.x);
     seed = pcg_hash(seed ^ global_id.y);
+    seed = pcg_hash(seed ^ uniforms.frame);
     seed = pcg_hash(seed ^ bitcast<u32>(uniforms.time));
     var rand = init_rand(seed);
 
     let camera = new_camera(dimensions);
-    render(camera, global_id, &rand);
+    
+    var frame_color = vec3<f32>();
+    for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
+        let r = get_ray(camera, global_id, &rand);
+        frame_color += ray_color(&rand, r);
+    }
+    frame_color *= PIXEL_SAMPLE_SCALE;
+
+    let tex_coords = vec2<i32>(global_id.xy);
+    var accumulated_color: vec3<f32>;
+
+    if (uniforms.frame == 0u) {
+        accumulated_color = frame_color;
+    } else {
+        let prev_color = textureLoad(accum_tex, tex_coords).rgb;
+        accumulated_color = prev_color + frame_color;
+    }
+
+    textureStore(accum_tex, tex_coords, vec4<f32>(accumulated_color, 1.0));
+
+    var final_color = accumulated_color / f32(uniforms.frame + 1u);
+
+    final_color.r = clamp(linear_to_gamma(final_color.r), 0.0, 0.999);
+    final_color.g = clamp(linear_to_gamma(final_color.g), 0.0, 0.999);
+    final_color.b = clamp(linear_to_gamma(final_color.b), 0.0, 0.999);
+
+    textureStore(tex, tex_coords, vec4<f32>(final_color, 1.0));
 }
 
 struct VertexOutput {

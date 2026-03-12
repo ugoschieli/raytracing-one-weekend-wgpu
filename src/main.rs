@@ -37,6 +37,7 @@ struct App {
 
     last_frame_time: Option<std::time::Instant>,
     fps: f32,
+    frame_count: u32,
 }
 
 impl App {
@@ -53,6 +54,7 @@ impl App {
 
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                 ..Default::default()
             }))?;
 
@@ -92,6 +94,18 @@ impl App {
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let accum_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Accumulation Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let accum_texture_view = accum_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -100,7 +114,7 @@ impl App {
 
         let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Time Buffer"),
-            size: 4,
+            size: 8,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -127,6 +141,16 @@ impl App {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::Rgba32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
                         },
                         count: None,
                     },
@@ -160,6 +184,10 @@ impl App {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: time_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&accum_texture_view),
                 },
             ],
         });
@@ -372,11 +400,17 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f32();
+
+        let mut uniform_data = [0u8; 8];
+        uniform_data[0..4].copy_from_slice(&time.to_ne_bytes());
+        uniform_data[4..8].copy_from_slice(&self.frame_count.to_ne_bytes());
+
         self.queue.as_ref().unwrap().write_buffer(
             self.time_buffer.as_ref().unwrap(),
             0,
-            &time.to_ne_bytes(),
+            &uniform_data,
         );
+        self.frame_count += 1;
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
