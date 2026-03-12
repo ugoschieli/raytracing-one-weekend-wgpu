@@ -1,8 +1,18 @@
 @group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, write>;
 
+struct CameraUniforms {
+    center: vec3<f32>,
+    pixel00_loc: vec3<f32>,
+    pixel_delta_u: vec3<f32>,
+    pixel_delta_v: vec3<f32>,
+}
+
 struct Uniforms {
     time: f32,
     frame: u32,
+    pad0: u32,
+    pad1: u32,
+    camera: CameraUniforms,
 }
 @group(0) @binding(1) var<uniform> uniforms: Uniforms;
 
@@ -19,14 +29,7 @@ struct Rand {
     seed: u32,
 }
 
-struct Camera {
-    image_width: u32,
-    image_height: u32,
-    center: vec3<f32>,
-    pixel00_loc: vec3<f32>,    // Location of pixel 0, 0
-    pixel_delta_u: vec3<f32>,  // Offset to pixel to the right
-    pixel_delta_v: vec3<f32>,
-}
+
 
 struct Ray {
     orig: vec3<f32>,
@@ -215,54 +218,7 @@ fn near_zero(e: vec3<f32>) -> bool {
     return (abs(e[0]) < s) && (abs(e[1]) < s) && (abs(e[2]) < s);
 }
 
-fn new_camera(dimensions: vec2<u32>) -> Camera {
-    let image_width = dimensions.x;
-    let image_height = dimensions.y;
 
-    let center = vec3<f32>(0, 0, 0);
-
-    // Determine viewport dimensions.
-    let focal_length = 1.0;
-    let viewport_height = 2.0;
-    let viewport_width = viewport_height * (f32(image_width) / f32(image_height));
-
-    // Calculate the vectors across the horizontal and down the vertical viewport edges.
-    let viewport_u = vec3<f32>(viewport_width, 0, 0);
-    let viewport_v = vec3<f32>(0, -viewport_height, 0);
-
-    // Calculate the horizontal and vertical delta vectors from pixel to pixel.
-    let pixel_delta_u = viewport_u / f32(image_width);
-    let pixel_delta_v = viewport_v / f32(image_height);
-
-    // Calculate the location of the upper left pixel.
-    let viewport_upper_left =
-        center - vec3(0, 0, focal_length) - viewport_u/2 - viewport_v/2;
-    let pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
-
-    return Camera(image_width, image_height, center, pixel00_loc, pixel_delta_u, pixel_delta_v);
-}
-
-fn render(cam: Camera, global_id: vec3<u32>, rand: ptr<function, Rand>) {
-    var pixel_color = vec3<f32>();
-
-    for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
-        let r = get_ray(cam, global_id, rand);
-        pixel_color += ray_color(rand, r);
-    }
-
-    
-    pixel_color *= PIXEL_SAMPLE_SCALE;
-
-    pixel_color.r = linear_to_gamma(pixel_color.r);
-    pixel_color.g = linear_to_gamma(pixel_color.g);
-    pixel_color.b = linear_to_gamma(pixel_color.b);
-
-    pixel_color.r = clamp(pixel_color.r, 0, 0.999);
-    pixel_color.g = clamp(pixel_color.g, 0, 0.999);
-    pixel_color.b = clamp(pixel_color.b, 0, 0.999);
-
-    textureStore(tex, vec2<i32>(global_id.xy), vec4<f32>(pixel_color, 1));
-}
 
 fn hit_sphere(s: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function, HitRecord>) -> bool {
     let oc = s.center - r.orig;
@@ -295,7 +251,7 @@ fn hit_sphere(s: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function
     return true;
 }
 
-fn get_ray(cam: Camera, global_id: vec3<u32>, rand: ptr<function, Rand>) -> Ray {
+fn get_ray(cam: CameraUniforms, global_id: vec3<u32>, rand: ptr<function, Rand>) -> Ray {
     // Construct a camera ray originating from the origin and directed at randomly sampled
     // point around the pixel location i, j.
     let offset = sample_square(rand);
@@ -397,12 +353,10 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     seed = pcg_hash(seed ^ uniforms.frame);
     seed = pcg_hash(seed ^ bitcast<u32>(uniforms.time));
     var rand = init_rand(seed);
-
-    let camera = new_camera(dimensions);
     
     var frame_color = vec3<f32>();
     for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
-        let r = get_ray(camera, global_id, &rand);
+        let r = get_ray(uniforms.camera, global_id, &rand);
         frame_color += ray_color(&rand, r);
     }
     frame_color *= PIXEL_SAMPLE_SCALE;

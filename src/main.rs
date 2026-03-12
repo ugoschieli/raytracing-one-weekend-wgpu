@@ -8,6 +8,33 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::{Fullscreen, Window, WindowId};
 
+#[derive(Default)]
+struct InputState {
+    forward: bool,
+    backward: bool,
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+    rmb_pressed: bool,
+}
+
+struct Camera {
+    pos: glam::Vec3,
+    yaw: f32,
+    pitch: f32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            pos: glam::Vec3::new(0.0, 0.0, 0.0),
+            yaw: -std::f32::consts::FRAC_PI_2,
+            pitch: 0.0,
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let event_loop = EventLoop::new()?;
@@ -38,6 +65,9 @@ struct App {
     last_frame_time: Option<std::time::Instant>,
     fps: f32,
     frame_count: u32,
+
+    camera: Camera,
+    input_state: InputState,
 }
 
 impl App {
@@ -114,7 +144,7 @@ impl App {
 
         let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Time Buffer"),
-            size: 8,
+            size: 80,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -328,12 +358,39 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // FPS Calculation
+        // FPS Calculation & Camera Update
         if let Some(last_time) = self.last_frame_time {
             let now = std::time::Instant::now();
-            let elapsed = now.duration_since(last_time).as_millis() as f32;
-            self.fps = 1000.0 / elapsed;
+            let elapsed = now.duration_since(last_time).as_secs_f32();
+            if elapsed > 0.0 {
+                self.fps = 1.0 / elapsed;
+            }
             self.last_frame_time = Some(now);
+
+            let speed = 5.0 * elapsed;
+            let (yaw_sin, yaw_cos) = self.camera.yaw.sin_cos();
+            let (pitch_sin, pitch_cos) = self.camera.pitch.sin_cos();
+
+            let forward = glam::Vec3::new(
+                pitch_cos * yaw_cos,
+                pitch_sin,
+                pitch_cos * yaw_sin,
+            ).normalize();
+            
+            let right = forward.cross(glam::Vec3::Y).normalize();
+
+            let old_pos = self.camera.pos;
+
+            if self.input_state.forward { self.camera.pos += forward * speed; }
+            if self.input_state.backward { self.camera.pos -= forward * speed; }
+            if self.input_state.left { self.camera.pos -= right * speed; }
+            if self.input_state.right { self.camera.pos += right * speed; }
+            if self.input_state.up { self.camera.pos += glam::Vec3::Y * speed; }
+            if self.input_state.down { self.camera.pos -= glam::Vec3::Y * speed; }
+
+            if old_pos != self.camera.pos {
+                self.frame_count = 0;
+            }
         }
 
         // Egui Frame Update
@@ -396,14 +453,45 @@ impl App {
             &screen_descriptor,
         );
 
+        let (yaw_sin, yaw_cos) = self.camera.yaw.sin_cos();
+        let (pitch_sin, pitch_cos) = self.camera.pitch.sin_cos();
+        let forward = glam::Vec3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize();
+        let right = forward.cross(glam::Vec3::Y).normalize();
+        let up = right.cross(forward).normalize();
+        let width = self.surface_config.as_ref().unwrap().width as f32;
+        let height = self.surface_config.as_ref().unwrap().height as f32;
+        let aspect_ratio = width / height;
+
+        let focal_length = 1.0;
+        let viewport_height = 2.0;
+        let viewport_width = viewport_height * aspect_ratio;
+        let viewport_u = right * viewport_width;
+        let viewport_v = -up * viewport_height;
+
+        let pixel_delta_u = viewport_u / width;
+        let pixel_delta_v = viewport_v / height;
+        let viewport_upper_left = self.camera.pos + (forward * focal_length) - viewport_u / 2.0 - viewport_v / 2.0;
+        let pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
+
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f32();
 
-        let mut uniform_data = [0u8; 8];
+        let mut uniform_data = [0u8; 80];
         uniform_data[0..4].copy_from_slice(&time.to_ne_bytes());
         uniform_data[4..8].copy_from_slice(&self.frame_count.to_ne_bytes());
+
+        fn copy_vec3(dst: &mut [u8], v: glam::Vec3) {
+            dst[0..4].copy_from_slice(&v.x.to_ne_bytes());
+            dst[4..8].copy_from_slice(&v.y.to_ne_bytes());
+            dst[8..12].copy_from_slice(&v.z.to_ne_bytes());
+        }
+
+        copy_vec3(&mut uniform_data[16..28], self.camera.pos);
+        copy_vec3(&mut uniform_data[32..44], pixel00_loc);
+        copy_vec3(&mut uniform_data[48..60], pixel_delta_u);
+        copy_vec3(&mut uniform_data[64..76], pixel_delta_v);
 
         self.queue.as_ref().unwrap().write_buffer(
             self.time_buffer.as_ref().unwrap(),
@@ -473,6 +561,23 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            if self.input_state.rmb_pressed {
+                self.camera.yaw += (delta.0 as f32) * 0.005;
+                self.camera.pitch -= (delta.1 as f32) * 0.005;
+                let clamp_val = 89.0f32.to_radians();
+                self.camera.pitch = self.camera.pitch.clamp(-clamp_val, clamp_val);
+                self.frame_count = 0;
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             self.window = Some(Arc::new(
@@ -508,6 +613,31 @@ impl ApplicationHandler for App {
         }
 
         match event {
+            WindowEvent::KeyboardInput {
+                event:
+                    winit::event::KeyEvent {
+                        physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                let is_pressed = state == winit::event::ElementState::Pressed;
+                match key_code {
+                    winit::keyboard::KeyCode::KeyW => self.input_state.forward = is_pressed,
+                    winit::keyboard::KeyCode::KeyS => self.input_state.backward = is_pressed,
+                    winit::keyboard::KeyCode::KeyA => self.input_state.left = is_pressed,
+                    winit::keyboard::KeyCode::KeyD => self.input_state.right = is_pressed,
+                    winit::keyboard::KeyCode::Space => self.input_state.up = is_pressed,
+                    winit::keyboard::KeyCode::ShiftLeft => self.input_state.down = is_pressed,
+                    _ => {}
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == winit::event::MouseButton::Right {
+                    self.input_state.rmb_pressed = state == winit::event::ElementState::Pressed;
+                }
+            }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 match self.render() {
