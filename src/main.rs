@@ -1,12 +1,19 @@
 use std::sync::Arc;
 
-use egui_wgpu::RendererOptions;
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::{Fullscreen, Window, WindowId};
+
+use crate::camera::{Camera, CameraUniforms};
+use crate::raytracing::{RaytracingPass, RenderPass};
+use crate::renderer::Renderer;
+
+mod camera;
+mod raytracing;
+mod renderer;
+mod utils;
 
 #[derive(Default)]
 struct InputState {
@@ -17,22 +24,6 @@ struct InputState {
     up: bool,
     down: bool,
     rmb_pressed: bool,
-}
-
-struct Camera {
-    pos: glam::Vec3,
-    yaw: f32,
-    pitch: f32,
-}
-
-impl Default for Camera {
-    fn default() -> Self {
-        Self {
-            pos: glam::Vec3::new(0.0, 0.0, 0.0),
-            yaw: -std::f32::consts::FRAC_PI_2,
-            pitch: 0.0,
-        }
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,20 +38,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Default)]
 struct App {
+    renderer: Option<Renderer>,
+    raytracing_pass: Option<RaytracingPass>,
+    render_pass: Option<RenderPass>,
     window: Option<Arc<Window>>,
-    device: Option<wgpu::Device>,
-    queue: Option<wgpu::Queue>,
-    surface: Option<wgpu::Surface<'static>>,
-    surface_config: Option<wgpu::SurfaceConfiguration>,
-
-    compute_pipeline: Option<wgpu::ComputePipeline>,
-    compute_bind_group: Option<wgpu::BindGroup>,
-    time_buffer: Option<wgpu::Buffer>,
-    render_pipeline: Option<wgpu::RenderPipeline>,
-    render_bind_group: Option<wgpu::BindGroup>,
-
-    egui_state: Option<egui_winit::State>,
-    egui_renderer: Option<egui_wgpu::Renderer>,
 
     last_frame_time: Option<std::time::Instant>,
     fps: f32,
@@ -70,293 +51,35 @@ struct App {
     input_state: InputState,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    time: f32,
+    frame: u32,
+    _padding: [u32; 2],
+    camera_uniforms: CameraUniforms,
+}
+
 impl App {
     fn init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let window = self.window.as_ref().unwrap();
+        let renderer = Renderer::new(window.clone());
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))?;
-
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
-                ..Default::default()
-            }))?;
-
-        let surface = instance.create_surface(self.window.as_ref().unwrap().clone())?;
-
-        let mut surface_config = surface
-            .get_default_config(
-                &adapter,
-                self.window.as_ref().unwrap().inner_size().width,
-                self.window.as_ref().unwrap().inner_size().height,
-            )
-            .unwrap();
-        surface_config.format = wgpu::TextureFormat::Bgra8Unorm;
-        surface_config.present_mode = wgpu::PresentMode::Fifo;
-        log::info!("Surface config: {:#?}", surface_config);
-        surface.configure(&device, &surface_config);
-
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-
-        // Texture for compute shader
-        let texture_size = wgpu::Extent3d {
-            width: surface_config.width,
-            height: surface_config.height,
-            depth_or_array_layers: 1,
-        };
-
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Compute Texture"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let accum_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Accumulation Texture"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-        });
-        let accum_texture_view = accum_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Time Buffer"),
-            size: 80,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Compute pipeline
-        let compute_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Compute Bind Group Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::ReadWrite,
-                            format: wgpu::TextureFormat::Rgba32Float,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let compute_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Compute Pipeline Layout"),
-                bind_group_layouts: &[&compute_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Compute Pipeline"),
-            layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Compute Bind Group"),
-            layout: &compute_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: time_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&accum_texture_view),
-                },
-            ],
-        });
-
-        // Render pipeline
-        let render_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Render Bind Group Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&render_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
-
-        let render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Render Bind Group"),
-            layout: &render_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
-        self.device = Some(device);
-        self.queue = Some(queue);
-        self.surface = Some(surface);
-
-        let context = egui::Context::default();
-        let viewport_id = context.viewport_id();
-        let egui_state = egui_winit::State::new(
-            context,
-            viewport_id,
-            self.window.as_ref().unwrap(),
-            Some(self.window.as_ref().unwrap().scale_factor() as f32),
-            None,
-            None,
-        );
-        let egui_renderer = egui_wgpu::Renderer::new(
-            self.device.as_ref().unwrap(),
-            surface_config.format,
-            RendererOptions {
-                ..Default::default()
-            },
-        );
-
-        self.egui_state = Some(egui_state);
-        self.egui_renderer = Some(egui_renderer);
-
-        self.surface_config = Some(surface_config);
-
-        self.compute_pipeline = Some(compute_pipeline);
-        self.compute_bind_group = Some(compute_bind_group);
-        self.time_buffer = Some(time_buffer);
-        self.render_pipeline = Some(render_pipeline);
-        self.render_bind_group = Some(render_bind_group);
+        let raytracing_pass = RaytracingPass::new(&renderer);
+        let render_pass = RenderPass::new(&renderer, &raytracing_pass.texture());
 
         self.last_frame_time = Some(std::time::Instant::now());
+
+        self.renderer = Some(renderer);
+        self.raytracing_pass = Some(raytracing_pass);
+        self.render_pass = Some(render_pass);
 
         Ok(())
     }
 
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let output = match self.surface.as_ref().unwrap().get_current_texture() {
-            Ok(surface) => surface,
-            Err(wgpu::SurfaceError::Outdated) => {
-                log::warn!("Surface is outdated");
-                return Ok(());
-            }
-            Err(e) => return Err(Box::new(e)),
-        };
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let renderer = self.renderer.as_mut().unwrap();
+        let window = self.window.as_ref().unwrap();
 
         // FPS Calculation & Camera Update
         if let Some(last_time) = self.last_frame_time {
@@ -368,193 +91,41 @@ impl App {
             self.last_frame_time = Some(now);
 
             let speed = 5.0 * elapsed;
-            let (yaw_sin, yaw_cos) = self.camera.yaw.sin_cos();
-            let (pitch_sin, pitch_cos) = self.camera.pitch.sin_cos();
-
-            let forward = glam::Vec3::new(
-                pitch_cos * yaw_cos,
-                pitch_sin,
-                pitch_cos * yaw_sin,
-            ).normalize();
-            
-            let right = forward.cross(glam::Vec3::Y).normalize();
-
-            let old_pos = self.camera.pos;
-
-            if self.input_state.forward { self.camera.pos += forward * speed; }
-            if self.input_state.backward { self.camera.pos -= forward * speed; }
-            if self.input_state.left { self.camera.pos -= right * speed; }
-            if self.input_state.right { self.camera.pos += right * speed; }
-            if self.input_state.up { self.camera.pos += glam::Vec3::Y * speed; }
-            if self.input_state.down { self.camera.pos -= glam::Vec3::Y * speed; }
-
-            if old_pos != self.camera.pos {
-                self.frame_count = 0;
-            }
+            self.camera
+                .update(&self.input_state, speed, &mut self.frame_count);
         }
 
-        // Egui Frame Update
-        let raw_input = self
-            .egui_state
-            .as_mut()
-            .unwrap()
-            .take_egui_input(self.window.as_ref().unwrap());
-
-        let full_output = self
-            .egui_state
-            .as_mut()
-            .unwrap()
-            .egui_ctx()
-            .run(raw_input, |ctx| {
-                egui::Window::new("Stats").show(ctx, |ui| {
-                    ui.label(format!("FPS: {:.1}", self.fps));
+        let ui = |ctx: &egui::Context| {
+            egui::Window::new("Stats")
+                .frame(egui::Frame::new())
+                .title_bar(false)
+                .movable(false)
+                .resizable(false)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("FPS: {:.0}", self.fps))
+                                .text_style(egui::TextStyle::Heading)
+                                .color(egui::Color32::BLACK),
+                        )
+                        .selectable(false),
+                    );
                 });
-            });
-
-        let clipped_primitives = self
-            .egui_state
-            .as_mut()
-            .unwrap()
-            .egui_ctx()
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-
-        // We only use one encoder for everything to avoid lifetime complexites
-        let mut encoder =
-            self.device
-                .as_ref()
-                .unwrap()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Render Encoder"),
-                });
-
-        // Update Egui buffers
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [
-                self.surface_config.as_ref().unwrap().width,
-                self.surface_config.as_ref().unwrap().height,
-            ],
-            pixels_per_point: self.window.as_ref().unwrap().scale_factor() as f32,
         };
 
-        for (id, image_delta) in &full_output.textures_delta.set {
-            self.egui_renderer.as_mut().unwrap().update_texture(
-                self.device.as_ref().unwrap(),
-                self.queue.as_ref().unwrap(),
-                *id,
-                image_delta,
-            );
-        }
-
-        self.egui_renderer.as_mut().unwrap().update_buffers(
-            self.device.as_ref().unwrap(),
-            self.queue.as_ref().unwrap(),
-            &mut encoder,
-            &clipped_primitives,
-            &screen_descriptor,
+        self.raytracing_pass.as_ref().unwrap().update(
+            renderer,
+            &self.camera,
+            &mut self.frame_count,
         );
 
-        let (yaw_sin, yaw_cos) = self.camera.yaw.sin_cos();
-        let (pitch_sin, pitch_cos) = self.camera.pitch.sin_cos();
-        let forward = glam::Vec3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize();
-        let right = forward.cross(glam::Vec3::Y).normalize();
-        let up = right.cross(forward).normalize();
-        let width = self.surface_config.as_ref().unwrap().width as f32;
-        let height = self.surface_config.as_ref().unwrap().height as f32;
-        let aspect_ratio = width / height;
-
-        let focal_length = 1.0;
-        let viewport_height = 2.0;
-        let viewport_width = viewport_height * aspect_ratio;
-        let viewport_u = right * viewport_width;
-        let viewport_v = -up * viewport_height;
-
-        let pixel_delta_u = viewport_u / width;
-        let pixel_delta_v = viewport_v / height;
-        let viewport_upper_left = self.camera.pos + (forward * focal_length) - viewport_u / 2.0 - viewport_v / 2.0;
-        let pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
-
-        let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f32();
-
-        let mut uniform_data = [0u8; 80];
-        uniform_data[0..4].copy_from_slice(&time.to_ne_bytes());
-        uniform_data[4..8].copy_from_slice(&self.frame_count.to_ne_bytes());
-
-        fn copy_vec3(dst: &mut [u8], v: glam::Vec3) {
-            dst[0..4].copy_from_slice(&v.x.to_ne_bytes());
-            dst[4..8].copy_from_slice(&v.y.to_ne_bytes());
-            dst[8..12].copy_from_slice(&v.z.to_ne_bytes());
-        }
-
-        copy_vec3(&mut uniform_data[16..28], self.camera.pos);
-        copy_vec3(&mut uniform_data[32..44], pixel00_loc);
-        copy_vec3(&mut uniform_data[48..60], pixel_delta_u);
-        copy_vec3(&mut uniform_data[64..76], pixel_delta_v);
-
-        self.queue.as_ref().unwrap().write_buffer(
-            self.time_buffer.as_ref().unwrap(),
-            0,
-            &uniform_data,
-        );
-        self.frame_count += 1;
-
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Compute Pass"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(self.compute_pipeline.as_ref().unwrap());
-            compute_pass.set_bind_group(0, self.compute_bind_group.as_ref().unwrap(), &[]);
-
-            let surface_config = self.surface_config.as_ref().unwrap();
-            let workgroup_x = (surface_config.width + 15) / 16;
-            let workgroup_y = (surface_config.height + 15) / 16;
-            compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
-        }
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            render_pass.set_pipeline(self.render_pipeline.as_ref().unwrap());
-            render_pass.set_bind_group(0, self.render_bind_group.as_ref().unwrap(), &[]);
-            render_pass.draw(0..3, 0..1);
-
-            // Draw egui
-            self.egui_renderer.as_mut().unwrap().render(
-                &mut render_pass.forget_lifetime(),
-                &clipped_primitives,
-                &screen_descriptor,
-            );
-        }
-
-        self.queue.as_ref().unwrap().submit(Some(encoder.finish()));
-        output.present();
-
-        // Cleanup egui textures
-        for x in &full_output.textures_delta.free {
-            self.egui_renderer.as_mut().unwrap().free_texture(x);
-        }
+        renderer.render(
+            window,
+            &self.raytracing_pass.as_ref().unwrap(),
+            &self.render_pass.as_ref().unwrap(),
+            ui,
+        )?;
 
         Ok(())
     }
@@ -585,7 +156,6 @@ impl ApplicationHandler for App {
                     .create_window(
                         Window::default_attributes()
                             .with_title("Ray Tracing")
-                            // .with_inner_size(PhysicalSize::new(600, 400)),
                             .with_fullscreen(Some(Fullscreen::Borderless(None)))
                             .with_borderless_game(true),
                     )
@@ -602,8 +172,10 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if let Some(egui_state) = self.egui_state.as_mut() {
-            let response = egui_state.on_window_event(self.window.as_ref().unwrap(), &event);
+        if let Some(renderer) = self.renderer.as_mut() {
+            let response = renderer
+                .egui_state
+                .on_window_event(self.window.as_ref().unwrap(), &event);
             if response.repaint {
                 self.window.as_ref().unwrap().request_redraw();
             }
