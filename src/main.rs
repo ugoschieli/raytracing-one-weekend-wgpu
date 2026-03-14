@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use glam::Vec3;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -9,10 +10,12 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::camera::{Camera, CameraUniforms};
 use crate::raytracing::{RaytracingPass, RenderPass};
 use crate::renderer::Renderer;
+use crate::sphere::{Material, Sphere, World};
 
 mod camera;
 mod raytracing;
 mod renderer;
+mod sphere;
 mod utils;
 
 #[derive(Default)]
@@ -65,7 +68,31 @@ impl App {
         let window = self.window.as_ref().unwrap();
         let renderer = Renderer::new(window.clone());
 
-        let raytracing_pass = RaytracingPass::new(&renderer);
+        let world = World::new(&[
+            Sphere::new(
+                Vec3::new(0.0, -100.5, -1.0),
+                100.0,
+                Material::Metal(Vec3::new(0.8, 0.2, 0.0), 0.1),
+            ),
+            Sphere::new(
+                Vec3::new(0.0, 0.0, -1.2),
+                0.5,
+                Material::Lambertian(Vec3::new(0.1, 0.2, 0.5)),
+            ),
+            Sphere::new(Vec3::new(-1.0, 0.0, -1.0), 0.5, Material::Dielectric(1.50)),
+            Sphere::new(
+                Vec3::new(-1.0, 0.0, -1.0),
+                0.4,
+                Material::Dielectric(1.0 / 1.50),
+            ),
+            Sphere::new(
+                Vec3::new(1.0, 0.0, -1.0),
+                0.5,
+                Material::Metal(Vec3::new(0.6, 0.6, 0.6), 0.3),
+            ),
+        ]);
+
+        let raytracing_pass = RaytracingPass::new(&renderer, &world);
         let render_pass = RenderPass::new(&renderer, &raytracing_pass.texture());
 
         self.last_frame_time = Some(std::time::Instant::now());

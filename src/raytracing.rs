@@ -1,7 +1,10 @@
+use wgpu::util::DeviceExt;
+
 use crate::{
     Uniforms,
     camera::Camera,
     renderer::{Renderer, Texture},
+    sphere::World,
     utils::*,
 };
 
@@ -20,7 +23,7 @@ pub struct RenderPass {
 }
 
 impl RaytracingPass {
-    pub fn new(renderer: &Renderer) -> Self {
+    pub fn new(renderer: &Renderer, world: &World) -> Self {
         let device = renderer.device();
         let shader = device.create_shader_module(wgpu::include_wgsl!("raytracing.wgsl"));
 
@@ -39,6 +42,12 @@ impl RaytracingPass {
             wgpu::TextureUsages::STORAGE_BINDING,
             wgpu::TextureFormat::Rgba32Float,
         );
+
+        let world_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("World Buffer"),
+            contents: bytemuck::cast_slice(&world.to_uniform()),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
 
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Time Buffer"),
@@ -80,6 +89,16 @@ impl RaytracingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -98,6 +117,10 @@ impl RaytracingPass {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&accum_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: world_buffer.as_entire_binding(),
                 },
             ],
         });

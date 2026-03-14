@@ -22,6 +22,8 @@ struct Uniforms {
 
 @group(0) @binding(2) var accum_tex: texture_storage_2d<rgba32float, read_write>;
 
+@group(0) @binding(3) var<storage, read> world: array<Sphere>;
+
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
 const SAMPLE_PER_PIXEL: u32 = 1;
@@ -47,28 +49,29 @@ struct HitRecord {
 }
 
 struct Sphere {
+    mat: Material,
     center: vec3<f32>,
     radius: f32,
-    mat: Material,
 }
 
 struct Material {
     mat_type: MaterialType,
-    albedo: vec3<f32>,
     fuzz: f32, // only useful for metal
     refraction_index: f32, // only useful for dielectrics
+    _pad: u32,
+    albedo: vec3<f32>,
 }
 
 fn Lambertian(albedo: vec3<f32>) -> Material {
-    return Material(MAT_LAMBERTIAN, albedo, 0, 0);
+    return Material(MAT_LAMBERTIAN, 0, 0, 0, albedo);
 }
 
 fn Metal(albedo: vec3<f32>, fuzz: f32) -> Material {
-    return Material(MAT_METAL, albedo, clamp(fuzz, 0.0, 1.0), 0);
+    return Material(MAT_METAL, clamp(fuzz, 0.0, 1.0), 0, 0, albedo);
 }
 
 fn Dielectric(refraction_index: f32) -> Material {
-    return Material(MAT_DIELECTRIC, vec3(), 0, refraction_index);
+    return Material(MAT_DIELECTRIC, 0, refraction_index, 0, vec3<f32>());
 }
 
 fn mat_scatter(rand: ptr<function, Rand>, r_in: Ray, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
@@ -141,7 +144,7 @@ fn reflectance(cosine: f32, refraction_index: f32) -> f32 {
     // Use Schlick's approximation for reflectance.
     var r0 = (1 - refraction_index) / (1 + refraction_index);
     r0 = r0 * r0;
-    return r0 + (1 - r0) * pow((1 - cosine), 5);
+    return r0 + (1 - r0) * pow((1.0 - cosine), 5.0);
 }
 
 alias MaterialType = u32;
@@ -186,7 +189,7 @@ fn random_unit_vector(r: ptr<function, Rand>) -> vec3<f32> {
         }
     }
 
-    return vec3();
+    return vec3<f32>();
 }
 
 fn random_on_hemisphere(r: ptr<function, Rand>, normal: vec3<f32>) -> vec3<f32> {
@@ -204,7 +207,7 @@ fn linear_to_gamma(linear_component: f32) -> f32 {
         return sqrt(linear_component);
     }
 
-    return 0;
+    return 0.0;
 }
 
 fn near_zero(e: vec3<f32>) -> bool {
@@ -268,14 +271,7 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
 }
 
 fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
-    let world = array(
-        Sphere(vec3<f32>(0, -100.5, -1), 100, Lambertian(vec3<f32>(0.8, 0.8, 0.0))),
-        Sphere(vec3<f32>(0, 0, -1.2), 0.5, Lambertian(vec3<f32>(0.1, 0.2, 0.5))),
-        Sphere(vec3<f32>(-1, 0, -1), 0.5, Dielectric(1.50)),
-        // Sphere(vec3<f32>(-1, 0, -1), 0.4, Dielectric(1.0 / 1.50)),
-        Sphere(vec3<f32>(1, 0, -1), 0.5, Metal(vec3<f32>(0.6, 0.6, 0.6), 0.3)),
-    );
-    let world_size: u32 = 5;
+    let world_size: u32 = arrayLength(&world);
     var stop = false;
     var depth = 0;
 
