@@ -4,7 +4,6 @@ use crate::{
     Uniforms,
     camera::Camera,
     renderer::{Renderer, Texture},
-    sphere::World,
     utils::*,
 };
 
@@ -23,7 +22,7 @@ pub struct RenderPass {
 }
 
 impl RaytracingPass {
-    pub fn new(renderer: &Renderer, world: &World) -> Self {
+    pub fn new(renderer: &Renderer, world: &crate::cube::World) -> Self {
         let device = renderer.device();
         let shader = device.create_shader_module(wgpu::include_wgsl!("raytracing.wgsl"));
 
@@ -129,7 +128,7 @@ impl RaytracingPass {
             device,
             "Raytracing Pipeline",
             &shader,
-            &[&bind_group_layout],
+            &[Some(&bind_group_layout)],
         );
 
         Self {
@@ -219,8 +218,18 @@ impl RenderPass {
             ],
         });
 
-        let pipeline =
-            create_render_pipeline(device, "Render Pipeline", &shader, &[&bind_group_layout]);
+        let pipeline = create_render_pipeline(
+            device,
+            "Render Pipeline",
+            &shader,
+            &[Some(&bind_group_layout)],
+            &[Some(wgpu::ColorTargetState {
+                format: renderer.surface_config().format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            None,
+        );
 
         Self {
             bind_group,

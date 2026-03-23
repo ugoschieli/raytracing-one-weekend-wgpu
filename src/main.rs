@@ -8,14 +8,16 @@ use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::camera::{Camera, CameraUniforms};
-use crate::raytracing::{RaytracingPass, RenderPass};
+use crate::cube::{Cube, World};
+use crate::rasterizer::{DisplayPass, RasterizerPass};
+use crate::raytracing::RaytracingPass;
 use crate::renderer::Renderer;
-use crate::sphere::{Material, Sphere, World};
 
 mod camera;
+mod cube;
+mod rasterizer;
 mod raytracing;
 mod renderer;
-mod sphere;
 mod utils;
 
 #[derive(Default)]
@@ -42,8 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Default)]
 struct App {
     renderer: Option<Renderer>,
-    raytracing_pass: Option<RaytracingPass>,
-    render_pass: Option<RenderPass>,
+    rasterizing_pass: Option<RasterizerPass>,
+    display_pass: Option<DisplayPass>,
     window: Option<Arc<Window>>,
 
     last_frame_time: Option<std::time::Instant>,
@@ -64,42 +66,34 @@ struct Uniforms {
 }
 
 impl App {
+    fn get_window(&self) -> Arc<Window> {
+        self.window.as_ref().unwrap().clone()
+    }
+
     fn init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let window = self.window.as_ref().unwrap();
+        let window = self.get_window();
         let renderer = Renderer::new(window.clone());
 
-        let world = World::new(&[
-            Sphere::new(
-                Vec3::new(0.0, -100.5, -1.0),
-                100.0,
-                Material::Metal(Vec3::new(0.8, 0.2, 0.0), 0.1),
-            ),
-            Sphere::new(
-                Vec3::new(0.0, 0.0, -1.2),
-                0.5,
-                Material::Lambertian(Vec3::new(0.1, 0.2, 0.5)),
-            ),
-            Sphere::new(Vec3::new(-1.0, 0.0, -1.0), 0.5, Material::Dielectric(1.50)),
-            Sphere::new(
-                Vec3::new(-1.0, 0.0, -1.0),
-                0.4,
-                Material::Dielectric(1.0 / 1.50),
-            ),
-            Sphere::new(
-                Vec3::new(1.0, 0.0, -1.0),
-                0.5,
-                Material::Metal(Vec3::new(0.6, 0.6, 0.6), 0.3),
-            ),
-        ]);
+        let world = World {
+            cubes: vec![
+                Cube::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0),
+                Cube::new(Vec3::new(0.0, -101.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 100.0),
+            ],
+        };
 
+        let rasterizing_pass = RasterizerPass::new(&renderer, &world);
         let raytracing_pass = RaytracingPass::new(&renderer, &world);
-        let render_pass = RenderPass::new(&renderer, &raytracing_pass.texture());
+        let display_pass = DisplayPass::new(
+            &renderer,
+            &rasterizing_pass.albedo_texture,
+            &rasterizing_pass.normal_texture,
+        );
 
         self.last_frame_time = Some(std::time::Instant::now());
 
         self.renderer = Some(renderer);
-        self.raytracing_pass = Some(raytracing_pass);
-        self.render_pass = Some(render_pass);
+        self.rasterizing_pass = Some(rasterizing_pass);
+        self.display_pass = Some(display_pass);
 
         Ok(())
     }
@@ -122,26 +116,7 @@ impl App {
                 .update(&self.input_state, speed, &mut self.frame_count);
         }
 
-        let ui = |ctx: &egui::Context| {
-            egui::Window::new("Stats")
-                .frame(egui::Frame::new())
-                .title_bar(false)
-                .movable(false)
-                .resizable(false)
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("FPS: {:.0}", self.fps))
-                                .text_style(egui::TextStyle::Heading)
-                                .color(egui::Color32::BLACK),
-                        )
-                        .selectable(false),
-                    );
-                });
-        };
-
-        self.raytracing_pass.as_ref().unwrap().update(
+        self.rasterizing_pass.as_ref().unwrap().update(
             renderer,
             &self.camera,
             &mut self.frame_count,
@@ -149,9 +124,8 @@ impl App {
 
         renderer.render(
             window,
-            &self.raytracing_pass.as_ref().unwrap(),
-            &self.render_pass.as_ref().unwrap(),
-            ui,
+            self.rasterizing_pass.as_ref().unwrap(),
+            self.display_pass.as_ref().unwrap(),
         )?;
 
         Ok(())
@@ -199,18 +173,6 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            let response = renderer
-                .egui_state
-                .on_window_event(self.window.as_ref().unwrap(), &event);
-            if response.repaint {
-                self.window.as_ref().unwrap().request_redraw();
-            }
-            if response.consumed {
-                return;
-            }
-        }
-
         match event {
             WindowEvent::KeyboardInput {
                 event:

@@ -1,4 +1,5 @@
 @group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var accum_tex: texture_storage_2d<rgba32float, read_write>;
 
 struct CameraUniforms {
     center: vec3<f32>,
@@ -9,6 +10,8 @@ struct CameraUniforms {
     pad2: f32,
     pixel_delta_v: vec3<f32>,
     pad3: f32,
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
 }
 
 struct Uniforms {
@@ -20,9 +23,21 @@ struct Uniforms {
 }
 @group(0) @binding(1) var<uniform> uniforms: Uniforms;
 
-@group(0) @binding(2) var accum_tex: texture_storage_2d<rgba32float, read_write>;
+struct Material {
+    mat_type: MaterialType,
+    fuzz: f32, // only useful for metal
+    refraction_index: f32, // only useful for dielectrics
+    _pad: u32,
+    albedo: vec3<f32>,
+    _pad1: u32,
+}
 
-@group(0) @binding(3) var<storage, read> world: array<Sphere>;
+struct Cube {
+    mat: Material,
+    center: vec3<f32>,
+    size: f32,
+}
+@group(0) @binding(3) var<storage, read> world: array<Cube>;
 
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
@@ -46,32 +61,6 @@ struct HitRecord {
     mat: Material,
     t: f32,
     front_face: bool,
-}
-
-struct Sphere {
-    mat: Material,
-    center: vec3<f32>,
-    radius: f32,
-}
-
-struct Material {
-    mat_type: MaterialType,
-    fuzz: f32, // only useful for metal
-    refraction_index: f32, // only useful for dielectrics
-    _pad: u32,
-    albedo: vec3<f32>,
-}
-
-fn Lambertian(albedo: vec3<f32>) -> Material {
-    return Material(MAT_LAMBERTIAN, 0, 0, 0, albedo);
-}
-
-fn Metal(albedo: vec3<f32>, fuzz: f32) -> Material {
-    return Material(MAT_METAL, clamp(fuzz, 0.0, 1.0), 0, 0, albedo);
-}
-
-fn Dielectric(refraction_index: f32) -> Material {
-    return Material(MAT_DIELECTRIC, 0, refraction_index, 0, vec3<f32>());
 }
 
 fn mat_scatter(rand: ptr<function, Rand>, r_in: Ray, rec: HitRecord, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
@@ -216,32 +205,52 @@ fn near_zero(e: vec3<f32>) -> bool {
     return (abs(e[0]) < s) && (abs(e[1]) < s) && (abs(e[2]) < s);
 }
 
-fn hit_sphere(s: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function, HitRecord>) -> bool {
-    let oc = s.center - r.orig;
-    let a = dot(r.dir, r.dir);
-    let h = dot(r.dir, oc);
-    let c = dot(oc, oc) - s.radius * s.radius;
-    let discriminant = h * h - a * c;
+fn hit_cube(cube: Cube, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function, HitRecord>) -> bool {
+    let min_bound = cube.center - vec3<f32>(cube.size, cube.size, cube.size);
+    let max_bound = cube.center + vec3<f32>(cube.size, cube.size, cube.size);
 
-    if (discriminant < 0) {
+    let invD = 1.0 / r.dir;
+    let t0 = (min_bound - r.orig) * invD;
+    let t1 = (max_bound - r.orig) * invD;
+
+    let tmin_vec = min(t0, t1);
+    let tmax_vec = max(t0, t1);
+
+    let tmin_val = max(tmin_vec.x, max(tmin_vec.y, tmin_vec.z));
+    let tmax_val = min(tmax_vec.x, min(tmax_vec.y, tmax_vec.z));
+
+    if (tmin_val >= tmax_val) {
         return false;
     }
 
-    let sqrtd = sqrt(discriminant);
-
-    // Find the nearest root that lies in the acceptable range.
-    var root = (h - sqrtd) / a;
-    if (root <= ray_tmin || ray_tmax <= root) {
-        root = (h + sqrtd) / a;
-        if (root <= ray_tmin || ray_tmax <= root) {
+    var t = tmin_val;
+    if (t < ray_tmin) {
+        t = tmax_val;
+        if (t < ray_tmin) {
             return false;
         }
     }
+    if (t > ray_tmax) {
+        return false;
+    }
 
-    (*rec).t = root;
+    (*rec).t = t;
     (*rec).p = ray_at(r, (*rec).t);
-    (*rec).mat = s.mat;
-    let outward_normal = ((*rec).p - s.center) / s.radius;
+    (*rec).mat = cube.mat;
+    
+    let p_local = (*rec).p - cube.center;
+    let p_abs = abs(p_local);
+    let max_c = max(p_abs.x, max(p_abs.y, p_abs.z));
+    
+    var outward_normal = vec3<f32>(0.0, 0.0, 0.0);
+    if (p_abs.x >= max_c - 1e-5) {
+        outward_normal.x = sign(p_local.x);
+    } else if (p_abs.y >= max_c - 1e-5) {
+        outward_normal.y = sign(p_local.y);
+    } else {
+        outward_normal.z = sign(p_local.z);
+    }
+
     set_face_normal(rec, r, outward_normal);
 
     return true;
@@ -285,7 +294,7 @@ fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
         var closest_so_far = INFINITY;
 
         for (var i: u32 = 0; i < world_size; i++) {
-            if (hit_sphere(world[i], r, 0.001, closest_so_far, &temp_rec)) {
+            if (hit_cube(world[i], r, 0.001, closest_so_far, &temp_rec)) {
                 hit_anything = true;
                 closest_so_far = temp_rec.t;
                 rec = temp_rec;

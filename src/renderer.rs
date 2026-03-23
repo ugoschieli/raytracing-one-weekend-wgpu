@@ -3,7 +3,7 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::{
-    raytracing::{RaytracingPass, RenderPass},
+    rasterizer::{DisplayPass, RasterizerPass},
     utils::*,
 };
 
@@ -12,9 +12,6 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
-    pub egui_state: egui_winit::State,
-    egui_renderer: egui_wgpu::Renderer,
-    egui_textures_to_free: Vec<egui::TextureId>,
 }
 
 #[derive(Debug)]
@@ -25,7 +22,7 @@ pub struct Texture {
 
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Self {
-        let instance = create_instance(None);
+        let instance = create_wgpu_instance();
         let adapter = create_adapter(&instance, None);
 
         let (device, queue) = create_device(
@@ -39,32 +36,11 @@ impl Renderer {
         let surface_config =
             configure_surface(&surface, &device, &adapter, window.inner_size(), None);
 
-        let context = egui::Context::default();
-        let viewport_id = context.viewport_id();
-        let egui_state = egui_winit::State::new(
-            context,
-            viewport_id,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &device,
-            surface_config.format,
-            egui_wgpu::RendererOptions {
-                ..Default::default()
-            },
-        );
-
         Self {
             device,
             queue,
             surface,
             surface_config,
-            egui_state,
-            egui_renderer,
-            egui_textures_to_free: Vec::new(),
         }
     }
 
@@ -124,18 +100,14 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        window: &Window,
-        raytracing_pass: &RaytracingPass,
-        display_pass: &RenderPass,
-        ui: impl FnMut(&egui::Context),
+        _window: &Window,
+        rasterizing_pass: &RasterizerPass,
+        display_pass: &DisplayPass,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let output = match self.surface().get_current_texture() {
-            Ok(surface) => surface,
-            Err(wgpu::SurfaceError::Outdated) => {
-                log::warn!("Surface is outdated");
-                return Ok(());
-            }
-            Err(e) => return Err(Box::new(e)),
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => return Ok(()),
         };
 
         let view = output
@@ -149,16 +121,7 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
-        let (clipped_primitives, screen_descriptor) = self.update_ui(window, &mut encoder, ui);
-
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Compute Pass"),
-                timestamp_writes: None,
-            });
-
-            raytracing_pass.compute(self, &mut compute_pass);
-        }
+        rasterizing_pass.render(&mut encoder);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -180,75 +143,15 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             display_pass.render(&mut render_pass);
-            self.render_ui(render_pass, &clipped_primitives, &screen_descriptor);
         }
 
         self.queue().submit(Some(encoder.finish()));
         output.present();
 
-        self.cleanup_ui();
-
         Ok(())
-    }
-
-    pub fn update_ui(
-        &mut self,
-        window: &Window,
-        encoder: &mut wgpu::CommandEncoder,
-        ui: impl FnMut(&egui::Context),
-    ) -> (Vec<egui::ClippedPrimitive>, egui_wgpu::ScreenDescriptor) {
-        let raw_input = self.egui_state.take_egui_input(window);
-
-        let full_output = self.egui_state.egui_ctx().run(raw_input, ui);
-
-        let clipped_primitives = self
-            .egui_state
-            .egui_ctx()
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.surface_config().width, self.surface_config().height],
-            pixels_per_point: window.scale_factor() as f32,
-        };
-
-        for (id, image_delta) in &full_output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, image_delta);
-        }
-
-        self.egui_renderer.update_buffers(
-            &self.device,
-            &self.queue,
-            encoder,
-            &clipped_primitives,
-            &screen_descriptor,
-        );
-
-        self.egui_textures_to_free
-            .extend(full_output.textures_delta.free);
-
-        (clipped_primitives, screen_descriptor)
-    }
-
-    pub fn render_ui<'a>(
-        &'a self,
-        render_pass: wgpu::RenderPass<'a>,
-        clipped_primitives: &[egui::ClippedPrimitive],
-        screen_descriptor: &egui_wgpu::ScreenDescriptor,
-    ) {
-        self.egui_renderer.render(
-            &mut render_pass.forget_lifetime(),
-            clipped_primitives,
-            screen_descriptor,
-        );
-    }
-
-    pub fn cleanup_ui(&mut self) {
-        for x in self.egui_textures_to_free.drain(..) {
-            self.egui_renderer.free_texture(&x);
-        }
     }
 }

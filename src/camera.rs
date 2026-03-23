@@ -17,6 +17,8 @@ pub struct CameraUniforms {
     _pad2: f32,
     pub pixel_delta_v: glam::Vec3,
     _pad3: f32,
+    pub view_proj: [[f32; 4]; 4],
+    pub inv_view_proj: [[f32; 4]; 4],
 }
 
 impl Default for Camera {
@@ -88,6 +90,12 @@ impl Camera {
             self.pos + (forward * focal_length) - viewport_u / 2.0 - viewport_v / 2.0;
         let pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
 
+        let view = glam::Mat4::look_to_rh(self.pos, forward, glam::Vec3::Y);
+        let proj =
+            glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect_ratio, 0.1, 1000.0);
+        let view_proj = (proj * view).to_cols_array_2d();
+        let inv_view_proj = (proj * view).inverse().to_cols_array_2d();
+
         CameraUniforms {
             center: self.pos,
             _pad0: 0.0,
@@ -97,6 +105,8 @@ impl Camera {
             _pad2: 0.0,
             pixel_delta_v,
             _pad3: 0.0,
+            view_proj,
+            inv_view_proj,
         }
     }
 }

@@ -2,15 +2,8 @@ use std::sync::Arc;
 
 use winit::{dpi::PhysicalSize, window::Window};
 
-pub(crate) fn create_instance(desc: Option<wgpu::InstanceDescriptor>) -> wgpu::Instance {
-    let descriptor = desc.unwrap_or(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..Default::default()
-    });
-
-    let instance = wgpu::Instance::new(&descriptor);
-
-    instance
+pub fn create_wgpu_instance() -> wgpu::Instance {
+    wgpu::Instance::default()
 }
 
 pub(crate) fn create_adapter(
@@ -72,12 +65,12 @@ pub fn create_compute_pipeline(
     device: &wgpu::Device,
     label: &str,
     shader: &wgpu::ShaderModule,
-    bind_groups: &[&wgpu::BindGroupLayout],
+    bind_groups: &[Option<&wgpu::BindGroupLayout>],
 ) -> wgpu::ComputePipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(format!("{} layout", label).as_str()),
         bind_group_layouts: bind_groups,
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
 
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -94,12 +87,14 @@ pub fn create_render_pipeline(
     device: &wgpu::Device,
     label: &str,
     shader: &wgpu::ShaderModule,
-    bind_groups: &[&wgpu::BindGroupLayout],
+    bind_groups: &[Option<&wgpu::BindGroupLayout>],
+    color_targets: &[Option<wgpu::ColorTargetState>],
+    depth_stencil: Option<wgpu::DepthStencilState>,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(format!("{} layout", label).as_str()),
         bind_group_layouts: bind_groups,
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -114,17 +109,20 @@ pub fn create_render_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Bgra8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: color_targets,
+            compilation_options: Default::default(),
         }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        primitive: wgpu::PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview_mask: None,
         cache: None,
     })
 }
