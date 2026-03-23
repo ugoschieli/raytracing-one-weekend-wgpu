@@ -9,8 +9,8 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::camera::{Camera, CameraUniforms};
 use crate::cube::{Cube, World};
-use crate::rasterizer::{DisplayPass, RasterizerPass};
-use crate::raytracing::RaytracingPass;
+use crate::rasterizer::RasterizerPass;
+use crate::raytracing::{RaytracingPass, RenderPass as DisplayPass};
 use crate::renderer::Renderer;
 
 mod camera;
@@ -45,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct App {
     renderer: Option<Renderer>,
     rasterizing_pass: Option<RasterizerPass>,
+    raytracing_pass: Option<RaytracingPass>,
     display_pass: Option<DisplayPass>,
     window: Option<Arc<Window>>,
 
@@ -74,25 +75,28 @@ impl App {
         let window = self.get_window();
         let renderer = Renderer::new(window.clone());
 
-        let world = World {
-            cubes: vec![
-                Cube::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0),
-                Cube::new(Vec3::new(0.0, -101.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 100.0),
-            ],
-        };
+        let world = World::new(&[
+            Cube::new(Vec3::new(0.0, 0.0, -10.0), Vec3::new(1.0, 0.0, 0.0), 0.5),
+            Cube::new(Vec3::new(0.0, 1.0, -10.0), Vec3::new(1.0, 1.0, 0.0), 0.5),
+            Cube::new(Vec3::new(1.0, 1.0, -10.0), Vec3::new(1.0, 0.0, 1.0), 0.5),
+            Cube::new(Vec3::new(0.0, -101.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 100.0),
+        ]);
 
         let rasterizing_pass = RasterizerPass::new(&renderer, &world);
-        let raytracing_pass = RaytracingPass::new(&renderer, &world);
-        let display_pass = DisplayPass::new(
+        let raytracing_pass = RaytracingPass::new(
             &renderer,
+            &world,
             &rasterizing_pass.albedo_texture,
             &rasterizing_pass.normal_texture,
+            &rasterizing_pass.depth_texture,
         );
+        let display_pass = DisplayPass::new(&renderer, raytracing_pass.texture());
 
         self.last_frame_time = Some(std::time::Instant::now());
 
         self.renderer = Some(renderer);
         self.rasterizing_pass = Some(rasterizing_pass);
+        self.raytracing_pass = Some(raytracing_pass);
         self.display_pass = Some(display_pass);
 
         Ok(())
@@ -108,6 +112,7 @@ impl App {
             let elapsed = now.duration_since(last_time).as_secs_f32();
             if elapsed > 0.0 {
                 self.fps = 1.0 / elapsed;
+                window.set_title(&format!("Ray Tracing - {:.1} FPS", self.fps));
             }
             self.last_frame_time = Some(now);
 
@@ -122,9 +127,16 @@ impl App {
             &mut self.frame_count,
         );
 
+        self.raytracing_pass.as_ref().unwrap().update(
+            renderer,
+            &self.camera,
+            &mut self.frame_count,
+        );
+
         renderer.render(
             window,
             self.rasterizing_pass.as_ref().unwrap(),
+            self.raytracing_pass.as_ref().unwrap(),
             self.display_pass.as_ref().unwrap(),
         )?;
 

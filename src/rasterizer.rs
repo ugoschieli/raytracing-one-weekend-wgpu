@@ -5,7 +5,6 @@ use crate::{
     camera::Camera,
     cube::{CUBE_INDICES, CUBE_VERTICES, Vertex, World},
     renderer::{Renderer, Texture},
-    utils::*,
 };
 
 pub struct RasterizerPass {
@@ -46,7 +45,7 @@ impl RasterizerPass {
             "G-Buffer Depth Texture",
             renderer.surface_config().width,
             renderer.surface_config().height,
-            wgpu::TextureUsages::RENDER_ATTACHMENT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             wgpu::TextureFormat::Depth32Float,
         );
 
@@ -199,8 +198,6 @@ impl RasterizerPass {
         renderer
             .queue()
             .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[uniforms]));
-
-        *frame_count += 1; // Unneeded for rasterization, but kept for compatibility
     }
 
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -254,91 +251,5 @@ impl RasterizerPass {
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
         render_pass.draw_indexed(0..self.num_indices, 0, 0..self.num_instances);
-    }
-}
-
-pub struct DisplayPass {
-    pub bind_group: wgpu::BindGroup,
-    pub pipeline: wgpu::RenderPipeline,
-}
-
-impl DisplayPass {
-    pub fn new(renderer: &Renderer, albedo_texture: &Texture, normal_texture: &Texture) -> Self {
-        let device = renderer.device();
-        let shader = device.create_shader_module(wgpu::include_wgsl!("rasterizer_display.wgsl"));
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Display Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Display Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&albedo_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&albedo_texture.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&normal_texture.view),
-                },
-            ],
-        });
-
-        let pipeline = create_render_pipeline(
-            renderer.device(),
-            "display",
-            &shader,
-            &[Some(&bind_group_layout)],
-            &[Some(wgpu::ColorTargetState {
-                format: renderer.surface_config().format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            None,
-        );
-        Self {
-            bind_group,
-            pipeline,
-        }
-    }
-
-    pub fn render(&self, render_pass: &mut wgpu::RenderPass<'_>) {
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.draw(0..3, 0..1);
     }
 }

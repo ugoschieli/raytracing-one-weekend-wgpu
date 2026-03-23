@@ -22,7 +22,13 @@ pub struct RenderPass {
 }
 
 impl RaytracingPass {
-    pub fn new(renderer: &Renderer, world: &crate::cube::World) -> Self {
+    pub fn new(
+        renderer: &Renderer,
+        world: &crate::cube::World,
+        albedo_texture: &Texture,
+        normal_texture: &Texture,
+        depth_texture: &Texture,
+    ) -> Self {
         let device = renderer.device();
         let shader = device.create_shader_module(wgpu::include_wgsl!("raytracing.wgsl"));
 
@@ -98,6 +104,36 @@ impl RaytracingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -120,6 +156,18 @@ impl RaytracingPass {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: world_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&albedo_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&normal_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&depth_texture.view),
                 },
             ],
         });

@@ -38,6 +38,9 @@ struct Cube {
     size: f32,
 }
 @group(0) @binding(3) var<storage, read> world: array<Cube>;
+@group(0) @binding(4) var gbuffer_albedo: texture_2d<f32>;
+@group(0) @binding(5) var gbuffer_normal: texture_2d<f32>;
+@group(0) @binding(6) var gbuffer_depth: texture_depth_2d;
 
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
@@ -209,7 +212,12 @@ fn hit_cube(cube: Cube, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function,
     let min_bound = cube.center - vec3<f32>(cube.size, cube.size, cube.size);
     let max_bound = cube.center + vec3<f32>(cube.size, cube.size, cube.size);
 
-    let invD = 1.0 / r.dir;
+    // Provide a protected dir that scales zeros to epsilon avoiding 1/0.0 = NaN anomalies.
+    var dir_sign = sign(r.dir);
+    dir_sign = select(dir_sign, vec3<f32>(1.0), dir_sign == vec3<f32>(0.0));
+    let safe_dir = max(abs(r.dir), vec3<f32>(1e-8)) * dir_sign;
+    let invD = 1.0 / safe_dir;
+
     let t0 = (min_bound - r.orig) * invD;
     let t1 = (max_bound - r.orig) * invD;
 
@@ -252,6 +260,11 @@ fn hit_cube(cube: Cube, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function,
     }
 
     set_face_normal(rec, r, outward_normal);
+    if (!(*rec).front_face && cube.mat.mat_type != MAT_DIELECTRIC) {
+        return false; // Eliminate Lambertian/Metal shadow acne efficiently
+    }
+    
+    (*rec).p += (*rec).normal * 0.005; // Offset to prevent shadow acne / self-intersection
 
     return true;
 }
@@ -279,13 +292,13 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.orig + t * r.dir;
 }
 
-fn ray_color(rand: ptr<function, Rand>, base_ray: Ray) -> vec3<f32> {
+fn ray_color_bounce(rand: ptr<function, Rand>, base_ray: Ray, initial_attenuation: vec3<f32>) -> vec3<f32> {
     let world_size: u32 = arrayLength(&world);
     var stop = false;
-    var depth = 0;
+    var depth = 1;
 
     var r = base_ray;
-    var cur_attenuation = vec3<f32>(1.0, 1.0, 1.0);
+    var cur_attenuation = initial_attenuation;
 
     while (!stop && depth <= MAX_DEPTH) {
         var rec = HitRecord();
@@ -352,14 +365,54 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     seed = pcg_hash(seed ^ bitcast<u32>(uniforms.time));
     var rand = init_rand(seed);
     
+    let tex_coords = vec2<i32>(global_id.xy);
+    let depth = textureLoad(gbuffer_depth, tex_coords, 0);
+
+    // Compute unjittered primary ray dir for incident vector
+    let pixel_sample = uniforms.camera.pixel00_loc
+        + (f32(global_id.x) * uniforms.camera.pixel_delta_u)
+        + (f32(global_id.y) * uniforms.camera.pixel_delta_v);
+    let primary_ray = Ray(uniforms.camera.center, pixel_sample - uniforms.camera.center);
+
     var frame_color = vec3<f32>();
-    for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
-        let r = get_ray(uniforms.camera, global_id, &rand);
-        frame_color += ray_color(&rand, r);
+
+    if (depth >= 1.0) {
+        let unit_direction = normalize(primary_ray.dir);
+        let a = 0.5 * (unit_direction.y + 1.0);
+        let sky_color = (1.0 - a) * vec3<f32>(1.0, 1.0, 1.0) + a * vec3<f32>(0.5, 0.7, 1.0);
+        frame_color = sky_color * f32(SAMPLE_PER_PIXEL);
+    } else {
+        let ndc_x = (f32(global_id.x) + 0.5) / f32(dimensions.x) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (f32(global_id.y) + 0.5) / f32(dimensions.y) * 2.0;
+
+        let ndc_pos = vec4<f32>(ndc_x, ndc_y, depth, 1.0);
+        let world_pos_homo = uniforms.camera.inv_view_proj * ndc_pos;
+        let world_pos = world_pos_homo.xyz / world_pos_homo.w;
+
+        let normal = textureLoad(gbuffer_normal, tex_coords, 0).xyz;
+        let albedo = textureLoad(gbuffer_albedo, tex_coords, 0).rgb;
+
+        var rec = HitRecord();
+        rec.mat = Material(MAT_LAMBERTIAN, 0.0, 0.0, 0u, albedo, 0u); 
+        rec.normal = normalize(normal); // Trust the specific G-Buffer rasterizer rendering normal
+        rec.front_face = true;
+        
+        // Push the reconstructed G-buffer hit slightly away from the camera mapping.
+        // We scale the offset relative to the distance heavily suppressing far-field depth inaccuracies.
+        let t_dist = length(world_pos - primary_ray.orig);
+        rec.p = world_pos + rec.normal * max(0.005, t_dist * 0.001);
+
+        for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
+            var scattered = Ray();
+            var attenuation = vec3<f32>();
+            if (mat_scatter(&rand, primary_ray, rec, &attenuation, &scattered)) {
+                frame_color += ray_color_bounce(&rand, scattered, attenuation);
+            }
+        }
     }
+
     frame_color *= PIXEL_SAMPLE_SCALE;
 
-    let tex_coords = vec2<i32>(global_id.xy);
     var accumulated_color: vec3<f32>;
 
     if (uniforms.frame == 0u) {

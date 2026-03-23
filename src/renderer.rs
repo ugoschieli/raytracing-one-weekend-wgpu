@@ -3,7 +3,8 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::{
-    rasterizer::{DisplayPass, RasterizerPass},
+    rasterizer::RasterizerPass,
+    raytracing::{RaytracingPass, RenderPass as DisplayPass},
     utils::*,
 };
 
@@ -102,6 +103,7 @@ impl Renderer {
         &mut self,
         _window: &Window,
         rasterizing_pass: &RasterizerPass,
+        raytracing_pass: &RaytracingPass,
         display_pass: &DisplayPass,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let output = match self.surface().get_current_texture() {
@@ -122,6 +124,14 @@ impl Renderer {
             });
 
         rasterizing_pass.render(&mut encoder);
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Raytracing Compute Pass"),
+                timestamp_writes: None,
+            });
+            raytracing_pass.compute(self, &mut compute_pass);
+        }
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
