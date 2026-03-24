@@ -41,6 +41,7 @@ struct Cube {
 @group(0) @binding(4) var gbuffer_albedo: texture_2d<f32>;
 @group(0) @binding(5) var gbuffer_normal: texture_2d<f32>;
 @group(0) @binding(6) var gbuffer_depth: texture_depth_2d;
+@group(0) @binding(7) var gbuffer_material: texture_2d<f32>;
 
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
@@ -97,11 +98,12 @@ fn lambert_scatter(rand: ptr<function, Rand>, rec: HitRecord, attenuation: ptr<f
 }
 
 fn metal_scatter(rand: ptr<function, Rand>, rec: HitRecord, r_in: Ray, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
-        var reflected = reflect(r_in.dir, rec.normal);
+        let unit_direction = normalize(r_in.dir);
+        var reflected = reflect(unit_direction, rec.normal);
         reflected = normalize(reflected) + (rec.mat.fuzz * random_unit_vector(rand));
         (*scattered) = Ray(rec.p, reflected);
         (*attenuation) = rec.mat.albedo;
-        return (dot((*scattered).dir, rec.normal) > 0);
+        return (dot((*scattered).dir, rec.normal) > 0.0);
 }
 
 fn dielectric_scatter(rand: ptr<function, Rand>, rec: HitRecord, r_in: Ray, attenuation: ptr<function, vec3<f32>>, scattered: ptr<function, Ray>) -> bool {
@@ -263,8 +265,6 @@ fn hit_cube(cube: Cube, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function,
     if (!(*rec).front_face && cube.mat.mat_type != MAT_DIELECTRIC) {
         return false; // Eliminate Lambertian/Metal shadow acne efficiently
     }
-    
-    (*rec).p += (*rec).normal * 0.005; // Offset to prevent shadow acne / self-intersection
 
     return true;
 }
@@ -321,6 +321,10 @@ fn ray_color_bounce(rand: ptr<function, Rand>, base_ray: Ray, initial_attenuatio
             var scattered = Ray();
             var attenuation = vec3<f32>();
             if (mat_scatter(rand, r, rec, &attenuation, &scattered)) {
+                let is_outward = (dot(scattered.dir, rec.normal) > 0.0);
+                let offset_normal = select(-rec.normal, rec.normal, is_outward);
+                scattered.orig = rec.p + offset_normal * 0.005;
+
                 r = scattered;
                 cur_attenuation *= attenuation;
             } else {
@@ -391,21 +395,25 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let normal = textureLoad(gbuffer_normal, tex_coords, 0).xyz;
         let albedo = textureLoad(gbuffer_albedo, tex_coords, 0).rgb;
+        let material = textureLoad(gbuffer_material, tex_coords, 0);
 
         var rec = HitRecord();
-        rec.mat = Material(MAT_LAMBERTIAN, 0.0, 0.0, 0u, albedo, 0u); 
+        rec.mat = Material(u32(material.x + 0.5), material.y, material.z, 0u, albedo, 0u); 
         rec.normal = normalize(normal); // Trust the specific G-Buffer rasterizer rendering normal
         rec.front_face = true;
         
-        // Push the reconstructed G-buffer hit slightly away from the camera mapping.
-        // We scale the offset relative to the distance heavily suppressing far-field depth inaccuracies.
         let t_dist = length(world_pos - primary_ray.orig);
-        rec.p = world_pos + rec.normal * max(0.005, t_dist * 0.001);
+        rec.p = world_pos;
 
         for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
             var scattered = Ray();
             var attenuation = vec3<f32>();
             if (mat_scatter(&rand, primary_ray, rec, &attenuation, &scattered)) {
+                let is_outward = (dot(scattered.dir, rec.normal) > 0.0);
+                let offset_normal = select(-rec.normal, rec.normal, is_outward);
+                let epsilon = max(0.005, t_dist * 0.001);
+                scattered.orig = rec.p + offset_normal * epsilon;
+
                 frame_color += ray_color_bounce(&rand, scattered, attenuation);
             }
         }

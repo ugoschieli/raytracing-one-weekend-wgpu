@@ -14,6 +14,7 @@ pub struct RasterizerPass {
     pub albedo_texture: Texture,
     pub normal_texture: Texture,
     pub depth_texture: Texture,
+    pub material_texture: Texture,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
@@ -47,6 +48,14 @@ impl RasterizerPass {
             renderer.surface_config().height,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             wgpu::TextureFormat::Depth32Float,
+        );
+
+        let material_texture = renderer.create_texture_2d(
+            "G-Buffer Material Texture",
+            renderer.surface_config().width,
+            renderer.surface_config().height,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureFormat::Rgba16Float,
         );
 
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -147,6 +156,11 @@ impl RasterizerPass {
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
                 compilation_options: Default::default(),
             }),
@@ -173,6 +187,7 @@ impl RasterizerPass {
             albedo_texture,
             normal_texture,
             depth_texture,
+            material_texture,
             vertex_buffer,
             index_buffer,
             num_indices: CUBE_INDICES.len() as u32,
@@ -220,6 +235,20 @@ impl RasterizerPass {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.normal_texture.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.material_texture.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {

@@ -28,6 +28,7 @@ impl RaytracingPass {
         albedo_texture: &Texture,
         normal_texture: &Texture,
         depth_texture: &Texture,
+        material_texture: &Texture,
     ) -> Self {
         let device = renderer.device();
         let shader = device.create_shader_module(wgpu::include_wgsl!("raytracing.wgsl"));
@@ -134,6 +135,16 @@ impl RaytracingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -168,6 +179,10 @@ impl RaytracingPass {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(&depth_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&material_texture.view),
                 },
             ],
         });

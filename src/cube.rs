@@ -43,11 +43,11 @@ pub struct World {
 }
 
 impl Cube {
-    pub fn new(position: Vec3, color: Vec3, size: f32) -> Self {
+    pub fn new(position: Vec3, size: f32, material: Material) -> Self {
         Self {
             position,
             size,
-            material: Material::Lambertian(color),
+            material,
         }
     }
 

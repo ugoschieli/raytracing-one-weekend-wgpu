@@ -8,7 +8,7 @@ use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::camera::{Camera, CameraUniforms};
-use crate::cube::{Cube, World};
+use crate::cube::{Cube, Material, World};
 use crate::rasterizer::RasterizerPass;
 use crate::raytracing::{RaytracingPass, RenderPass as DisplayPass};
 use crate::renderer::Renderer;
@@ -76,10 +76,37 @@ impl App {
         let renderer = Renderer::new(window.clone());
 
         let world = World::new(&[
-            Cube::new(Vec3::new(0.0, 0.0, -10.0), Vec3::new(1.0, 0.0, 0.0), 0.5),
-            Cube::new(Vec3::new(0.0, 1.0, -10.0), Vec3::new(1.0, 1.0, 0.0), 0.5),
-            Cube::new(Vec3::new(1.0, 1.0, -10.0), Vec3::new(1.0, 0.0, 1.0), 0.5),
-            Cube::new(Vec3::new(0.0, -101.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 100.0),
+            Cube::new(
+                Vec3::new(0.0, 0.0, -10.0),
+                0.5,
+                Material::Lambertian(Vec3::new(1.0, 0.0, 0.0)),
+            ),
+            Cube::new(
+                Vec3::new(0.0, 1.0, -10.0),
+                0.5,
+                Material::Lambertian(Vec3::new(1.0, 1.0, 0.0)),
+            ),
+            Cube::new(
+                Vec3::new(1.0, 1.0, -10.0),
+                0.5,
+                Material::Lambertian(Vec3::new(1.0, 0.0, 1.0)),
+            ),
+            Cube::new(
+                Vec3::new(1.0, 0.0, -10.0),
+                0.5,
+                Material::Metal(Vec3::new(0.3, 0.3, 0.3), 0.1),
+            ),
+            Cube::new(Vec3::new(0.0, -1.0, -10.0), 0.5, Material::Dielectric(1.33)),
+            Cube::new(
+                Vec3::new(1.0, -1.0, -10.0),
+                0.5,
+                Material::Metal(Vec3::new(0.0, 0.0, 1.0), 0.3),
+            ),
+            Cube::new(
+                Vec3::new(0.0, -101.5, 0.0),
+                100.0,
+                Material::Lambertian(Vec3::new(0.0, 1.0, 0.0)),
+            ),
         ]);
 
         let rasterizing_pass = RasterizerPass::new(&renderer, &world);
@@ -89,6 +116,7 @@ impl App {
             &rasterizing_pass.albedo_texture,
             &rasterizing_pass.normal_texture,
             &rasterizing_pass.depth_texture,
+            &rasterizing_pass.material_texture,
         );
         let display_pass = DisplayPass::new(&renderer, raytracing_pass.texture());
 

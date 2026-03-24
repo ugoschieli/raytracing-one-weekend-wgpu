@@ -47,6 +47,9 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) mat_type: u32,
+    @location(3) @interpolate(flat) roughness: f32,
+    @location(4) @interpolate(flat) refraction_index: f32,
 }
 
 @vertex
@@ -62,12 +65,16 @@ fn vs_main(model: VertexInput, @builtin(instance_index) instance_index: u32) -> 
     
     out.normal = model.normal;
     out.color = vec4<f32>(cube.mat.albedo, 1.0);
+    out.mat_type = cube.mat.mat_type;
+    out.roughness = cube.mat.roughness;
+    out.refraction_index = cube.mat.refraction_index;
     return out;
 }
 
 struct GBufferOutput {
     @location(0) albedo: vec4<f32>,
     @location(1) normal: vec4<f32>,
+    @location(2) material: vec4<f32>,
 }
 
 @fragment
@@ -76,5 +83,6 @@ fn fs_main(in: VertexOutput) -> GBufferOutput {
     // Hand over the interpolated color
     out.albedo = in.color;
     out.normal = vec4<f32>(normalize(in.normal), 1.0);
+    out.material = vec4<f32>(f32(in.mat_type), in.roughness, in.refraction_index, 0.0);
     return out;
 }
