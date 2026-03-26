@@ -7,6 +7,8 @@ edition = "2024"
 bytemuck = "1.25.0"
 env_logger = "0.11.9"
 glam = { version = "0.32.1", features = ["bytemuck"] }
+half = { version = "2.7.1", features = ["bytemuck"] }
+image = { version = "0.25.10", features = ["hdr"] }
 log = "0.4.29"
 pollster = "0.4.0"
 wgpu = "29.0"

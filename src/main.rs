@@ -62,7 +62,8 @@ struct App {
 struct Uniforms {
     time: f32,
     frame: u32,
-    _padding: [u32; 2],
+    is_hdr: u32,
+    _padding2: u32,
     camera_uniforms: CameraUniforms,
 }
 
@@ -94,7 +95,7 @@ impl App {
             Cube::new(
                 Vec3::new(1.0, 0.0, -10.0),
                 0.5,
-                Material::Metal(Vec3::new(0.3, 0.3, 0.3), 0.1),
+                Material::Metal(Vec3::new(0.8, 0.3, 0.3), 0.1),
             ),
             Cube::new(Vec3::new(0.0, -1.0, -10.0), 0.5, Material::Dielectric(1.33)),
             Cube::new(
@@ -103,11 +104,21 @@ impl App {
                 Material::Metal(Vec3::new(0.0, 0.0, 1.0), 0.3),
             ),
             Cube::new(
+                Vec3::new(0.0, 2.0, 0.0),
+                0.5,
+                Material::Emissive(Vec3::new(300.0, 100.0, 0.0)),
+            ),
+            Cube::new(
                 Vec3::new(0.0, -101.5, 0.0),
                 100.0,
-                Material::Lambertian(Vec3::new(0.0, 1.0, 0.0)),
+                // Material::Lambertian(Vec3::new(0.0, 0.1, 0.1)),
+                Material::Metal(Vec3::new(0.5, 0.5, 0.5), 0.1),
             ),
         ]);
+
+        let skybox_bytes =
+            std::fs::read("./src/assets/sky.hdr").expect("Failed to read skybox file");
+        let skybox_texture = renderer.create_skybox_texture("Skybox", &skybox_bytes);
 
         let rasterizing_pass = RasterizerPass::new(&renderer, &world);
         let raytracing_pass = RaytracingPass::new(
@@ -117,6 +128,7 @@ impl App {
             &rasterizing_pass.normal_texture,
             &rasterizing_pass.depth_texture,
             &rasterizing_pass.material_texture,
+            &skybox_texture,
         );
         let display_pass = DisplayPass::new(&renderer, raytracing_pass.texture());
 

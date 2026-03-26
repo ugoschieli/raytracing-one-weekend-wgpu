@@ -1,4 +1,4 @@
-@group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(0) var tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var accum_tex: texture_storage_2d<rgba32float, read_write>;
 
 struct CameraUniforms {
@@ -17,7 +17,7 @@ struct CameraUniforms {
 struct Uniforms {
     time: f32,
     frame: u32,
-    pad0: u32,
+    is_hdr: u32,
     pad1: u32,
     camera: CameraUniforms,
 }
@@ -42,12 +42,24 @@ struct Cube {
 @group(0) @binding(5) var gbuffer_normal: texture_2d<f32>;
 @group(0) @binding(6) var gbuffer_depth: texture_depth_2d;
 @group(0) @binding(7) var gbuffer_material: texture_2d<f32>;
+@group(0) @binding(8) var<storage, read> lights: array<u32>;
+@group(0) @binding(9) var skybox_tex: texture_2d<f32>;
+@group(0) @binding(10) var skybox_sampler: sampler;
+
 
 const PI: f32 = radians(180.0);
 const INFINITY: f32 = 100000000000.0;
 const SAMPLE_PER_PIXEL: u32 = 1;
 const MAX_DEPTH = 50;
 const PIXEL_SAMPLE_SCALE: f32 = 1.0 / f32(SAMPLE_PER_PIXEL); 
+fn sample_skybox(dir: vec3<f32>) -> vec3<f32> {
+    let unit_dir = normalize(dir);
+    let phi = atan2(unit_dir.z, unit_dir.x);
+    let theta = acos(unit_dir.y);
+    let u = 0.5 + phi / (2.0 * PI);
+    let v = theta / PI;
+    return textureSampleLevel(skybox_tex, skybox_sampler, vec2<f32>(u, v), 0.0).rgb;
+}
 
 struct Rand {
     iter: u32,
@@ -145,6 +157,7 @@ alias MaterialType = u32;
 const MAT_LAMBERTIAN: MaterialType = 0;
 const MAT_METAL: MaterialType = 1;
 const MAT_DIELECTRIC: MaterialType = 2;
+const MAT_EMISSIVE: MaterialType = 3;
 
 fn pcg_hash(input: u32) -> u32 {
     var state = input * 747796405u + 2891336453u;
@@ -194,6 +207,22 @@ fn random_on_hemisphere(r: ptr<function, Rand>, normal: vec3<f32>) -> vec3<f32> 
     else {
         return -on_unit_sphere;
     }
+}
+
+fn aces_tonemap(v: vec3<f32>) -> vec3<f32> {
+    // We use a Hue-Preserving Tonemap.
+    // Instead of applying ACES to each channel (which turns bright orange into white/yellow),
+    // we apply ACES to the *brightest* channel, and scale the others proportionally.
+    let max_comp = max(v.r, max(v.g, v.b));
+    
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    let mapped_max = clamp((max_comp * (a * max_comp + b)) / (max_comp * (c * max_comp + d) + e), 0.0, 1.0);
+    
+    return v * (mapped_max / max(max_comp, 1e-5));
 }
 
 fn linear_to_gamma(linear_component: f32) -> f32 {
@@ -269,6 +298,145 @@ fn hit_cube(cube: Cube, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: ptr<function,
     return true;
 }
 
+fn hit_shadow(r_in: Ray, max_distance: f32, target_cube_idx: u32) -> bool {
+    let world_size: u32 = arrayLength(&world);
+    for (var i: u32 = 0; i < world_size; i++) {
+        if (i == target_cube_idx) {
+            continue;
+        }
+
+        let cube = world[i];
+        let min_bound = cube.center - vec3<f32>(cube.size, cube.size, cube.size);
+        let max_bound = cube.center + vec3<f32>(cube.size, cube.size, cube.size);
+
+        var dir_sign = sign(r_in.dir);
+        dir_sign = select(dir_sign, vec3<f32>(1.0), dir_sign == vec3<f32>(0.0));
+        let safe_dir = max(abs(r_in.dir), vec3<f32>(1e-8)) * dir_sign;
+        let invD = 1.0 / safe_dir;
+
+        let t0 = (min_bound - r_in.orig) * invD;
+        let t1 = (max_bound - r_in.orig) * invD;
+
+        let tmin_vec = min(t0, t1);
+        let tmax_vec = max(t0, t1);
+
+        let tmin_val = max(tmin_vec.x, max(tmin_vec.y, tmin_vec.z));
+        let tmax_val = min(tmax_vec.x, min(tmax_vec.y, tmax_vec.z));
+
+        if (tmin_val >= tmax_val) {
+            continue;
+        }
+
+        var t = tmin_val;
+        if (t < 0.001) {
+            t = tmax_val;
+            if (t < 0.001) {
+                continue;
+            }
+        }
+        if (t < max_distance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn compute_nee(rand: ptr<function, Rand>, rec: HitRecord) -> vec3<f32> {
+    var nee_color = vec3<f32>(0.0);
+    let num_lights = arrayLength(&lights);
+    if (num_lights > 0u && rec.mat.mat_type == MAT_LAMBERTIAN) { 
+        let light_index = u32(rand_f32_min_max(rand, 0.0, f32(num_lights) - 0.0001));
+        let light_world_idx = lights[light_index];
+        let light = world[light_world_idx];
+                    
+        var light_p = vec3<f32>();
+        var light_n = vec3<f32>();
+        var light_pdf = 0.0;
+        sample_cube_light(rand, light, rec.p, &light_p, &light_n, &light_pdf);
+                    
+        let light_dir = light_p - rec.p;
+        let distance_to_light = length(light_dir);
+        let L = light_dir / distance_to_light; 
+        let N = rec.normal;
+                    
+        let cos_theta_recv = dot(N, L);
+        let cos_theta_light = dot(light_n, -L);
+                    
+        if (cos_theta_recv > 0.0 && cos_theta_light > 0.0) {
+            let shadow_ray = Ray(rec.p + N * 0.005, L);
+            if (!hit_shadow(shadow_ray, distance_to_light, light_world_idx)) {
+                let brdf = rec.mat.albedo / PI;
+                let G = (cos_theta_recv * cos_theta_light) / (distance_to_light * distance_to_light);
+                let pdf_light = light_pdf * (1.0 / f32(num_lights));
+                            
+                nee_color = (light.mat.albedo * brdf * G) / pdf_light;
+            }
+        }
+    }
+    return nee_color;
+}
+
+fn sample_cube_light(rand: ptr<function, Rand>, light: Cube, rec_p: vec3<f32>, light_p: ptr<function, vec3<f32>>, light_normal: ptr<function, vec3<f32>>, pdf: ptr<function, f32>) {
+    let s = light.size;
+    let relative_p = rec_p - light.center;
+    
+    var weights: array<f32, 6>;
+    var total_weight: f32 = 0.0;
+    
+    // Weight each face by its distance to the receiver along its normal.
+    // This perfectly biases the random choice towards faces that point heavily towards the receiver!
+    weights[0] = max(0.0, relative_p.x - s); // Right
+    weights[1] = max(0.0, -relative_p.x - s); // Left
+    weights[2] = max(0.0, relative_p.y - s); // Top
+    weights[3] = max(0.0, -relative_p.y - s); // Bottom
+    weights[4] = max(0.0, relative_p.z - s); // Front
+    weights[5] = max(0.0, -relative_p.z - s); // Back
+    
+    for (var i: u32 = 0; i < 6u; i++) {
+        total_weight += weights[i];
+    }
+    
+    if (total_weight < 1e-5) {
+        for (var i: u32 = 0; i < 6u; i++) { weights[i] = 1.0; }
+        total_weight = 6.0;
+    }
+    
+    let r = rand_f32_min_max(rand, 0.0, total_weight - 1e-5);
+    var cumul: f32 = 0.0;
+    var face_idx: u32 = 5u;
+    for (var i: u32 = 0; i < 6u; i++) {
+        cumul += weights[i];
+        if (r < cumul) {
+            face_idx = i;
+            break;
+        }
+    }
+    
+    let face_prob = weights[face_idx] / total_weight;
+    
+    let u = rand_f32_min_max(rand, -s, s);
+    let v = rand_f32_min_max(rand, -s, s);
+    
+    var p = vec3<f32>(0.0);
+    var n = vec3<f32>(0.0);
+    
+    switch face_idx {
+        case 0u: { p = vec3<f32>(s, u, v); n = vec3<f32>(1.0, 0.0, 0.0); } // Right
+        case 1u: { p = vec3<f32>(-s, u, v); n = vec3<f32>(-1.0, 0.0, 0.0); } // Left
+        case 2u: { p = vec3<f32>(u, s, v); n = vec3<f32>(0.0, 1.0, 0.0); } // Top
+        case 3u: { p = vec3<f32>(u, -s, v); n = vec3<f32>(0.0, -1.0, 0.0); } // Bottom
+        case 4u: { p = vec3<f32>(u, v, s); n = vec3<f32>(0.0, 0.0, 1.0); } // Front
+        case 5u: { p = vec3<f32>(u, v, -s); n = vec3<f32>(0.0, 0.0, -1.0); } // Back
+        default: {}
+    }
+    
+    (*light_p) = light.center + p;
+    (*light_normal) = n;
+    
+    let area_per_face = 4.0 * s * s;
+    (*pdf) = face_prob * (1.0 / area_per_face);
+}
+
 fn get_ray(cam: CameraUniforms, global_id: vec3<u32>, rand: ptr<function, Rand>) -> Ray {
     // Construct a camera ray originating from the origin and directed at randomly sampled
     // point around the pixel location i, j.
@@ -292,13 +460,15 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.orig + t * r.dir;
 }
 
-fn ray_color_bounce(rand: ptr<function, Rand>, base_ray: Ray, initial_attenuation: vec3<f32>) -> vec3<f32> {
+fn ray_color_bounce(rand: ptr<function, Rand>, base_ray: Ray, initial_attenuation: vec3<f32>, last_bounce_was_specular: bool) -> vec3<f32> {
     let world_size: u32 = arrayLength(&world);
     var stop = false;
     var depth = 1;
 
     var r = base_ray;
     var cur_attenuation = initial_attenuation;
+    var emitted_color = vec3<f32>(0.0);
+    var is_specular_bounce = last_bounce_was_specular;
 
     while (!stop && depth <= MAX_DEPTH) {
         var rec = HitRecord();
@@ -315,33 +485,44 @@ fn ray_color_bounce(rand: ptr<function, Rand>, base_ray: Ray, initial_attenuatio
         }
 
         if (hit_anything) {
-            if (depth == MAX_DEPTH) {
-                cur_attenuation = vec3<f32>();
-            }
-            var scattered = Ray();
-            var attenuation = vec3<f32>();
-            if (mat_scatter(rand, r, rec, &attenuation, &scattered)) {
-                let is_outward = (dot(scattered.dir, rec.normal) > 0.0);
-                let offset_normal = select(-rec.normal, rec.normal, is_outward);
-                scattered.orig = rec.p + offset_normal * 0.005;
-
-                r = scattered;
-                cur_attenuation *= attenuation;
-            } else {
-                cur_attenuation = vec3<f32>();
+            if (rec.mat.mat_type == MAT_EMISSIVE) {
+                // If the previous bounce didn't use NEE (it was specular), we must add the light's emission here
+                // to avoid entirely missing the light. If it used NEE (Lambertian), we ignore it to prevent double counting.
+                if (is_specular_bounce) {
+                    emitted_color += cur_attenuation * rec.mat.albedo;
+                }
+                cur_attenuation = vec3<f32>(0.0);
                 stop = true;
+            } else {
+                emitted_color += cur_attenuation * compute_nee(rand, rec);
+
+                if (depth == MAX_DEPTH) {
+                    cur_attenuation = vec3<f32>();
+                }
+                var scattered = Ray();
+                var attenuation = vec3<f32>();
+                let current_mat_type = rec.mat.mat_type;
+                if (mat_scatter(rand, r, rec, &attenuation, &scattered)) {
+                    let is_outward = (dot(scattered.dir, rec.normal) > 0.0);
+                    let offset_normal = select(-rec.normal, rec.normal, is_outward);
+                    scattered.orig = rec.p + offset_normal * 0.005;
+
+                    r = scattered;
+                    cur_attenuation *= attenuation;
+                    is_specular_bounce = (current_mat_type != MAT_LAMBERTIAN);
+                } else {
+                    cur_attenuation = vec3<f32>();
+                    stop = true;
+                }
             }
         } else {
+            emitted_color += cur_attenuation * sample_skybox(r.dir);
             stop = true;
         }
         depth += 1;
     }
 
-    let unit_direction = normalize(r.dir);
-    let a = 0.5 * (unit_direction.y + 1.0);
-    var final_color = cur_attenuation * ((1.0 - a) * vec3<f32>(1.0, 1.0, 1.0) + a * vec3<f32>(0.5, 0.7, 1.0));
-
-    return final_color;
+    return emitted_color;
 }
 
 fn set_face_normal(rec: ptr<function, HitRecord>, r: Ray, outward_normal: vec3<f32>) {
@@ -361,12 +542,10 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     // A better seed generation that breaks spatial and temporal patterns.
-    // By chaining the hashes, we ensure each pixel gets a wildly different 
-    // starting seed, preventing overlapping sequences across adjacent pixels.
-    var seed = pcg_hash(global_id.x);
-    seed = pcg_hash(seed ^ global_id.y);
+    // Combine x and y to ensure every pixel has a unique starting state, avoiding collisions.
+    let pixel_index = global_id.y * dimensions.x + global_id.x;
+    var seed = pcg_hash(pixel_index);
     seed = pcg_hash(seed ^ uniforms.frame);
-    seed = pcg_hash(seed ^ bitcast<u32>(uniforms.time));
     var rand = init_rand(seed);
     
     let tex_coords = vec2<i32>(global_id.xy);
@@ -381,10 +560,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var frame_color = vec3<f32>();
 
     if (depth >= 1.0) {
-        let unit_direction = normalize(primary_ray.dir);
-        let a = 0.5 * (unit_direction.y + 1.0);
-        let sky_color = (1.0 - a) * vec3<f32>(1.0, 1.0, 1.0) + a * vec3<f32>(0.5, 0.7, 1.0);
-        frame_color = sky_color * f32(SAMPLE_PER_PIXEL);
+        frame_color = sample_skybox(primary_ray.dir) * f32(SAMPLE_PER_PIXEL);
     } else {
         let ndc_x = (f32(global_id.x) + 0.5) / f32(dimensions.x) * 2.0 - 1.0;
         let ndc_y = 1.0 - (f32(global_id.y) + 0.5) / f32(dimensions.y) * 2.0;
@@ -408,13 +584,20 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var i: u32 = 0; i < SAMPLE_PER_PIXEL; i++) {
             var scattered = Ray();
             var attenuation = vec3<f32>();
-            if (mat_scatter(&rand, primary_ray, rec, &attenuation, &scattered)) {
-                let is_outward = (dot(scattered.dir, rec.normal) > 0.0);
-                let offset_normal = select(-rec.normal, rec.normal, is_outward);
-                let epsilon = max(0.005, t_dist * 0.001);
-                scattered.orig = rec.p + offset_normal * epsilon;
+            if (rec.mat.mat_type == MAT_EMISSIVE) {
+                frame_color += rec.mat.albedo;
+            } else {
+                frame_color += compute_nee(&rand, rec);
 
-                frame_color += ray_color_bounce(&rand, scattered, attenuation);
+                if (mat_scatter(&rand, primary_ray, rec, &attenuation, &scattered)) {
+                    let is_outward = (dot(scattered.dir, rec.normal) > 0.0);
+                    let offset_normal = select(-rec.normal, rec.normal, is_outward);
+                    let epsilon = max(0.005, t_dist * 0.001);
+                    scattered.orig = rec.p + offset_normal * epsilon;
+
+                    let is_specular = (rec.mat.mat_type != MAT_LAMBERTIAN);
+                    frame_color += ray_color_bounce(&rand, scattered, attenuation, is_specular);
+                }
             }
         }
     }
@@ -434,9 +617,17 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var final_color = accumulated_color / f32(uniforms.frame + 1u);
 
-    final_color.r = clamp(linear_to_gamma(final_color.r), 0.0, 0.999);
-    final_color.g = clamp(linear_to_gamma(final_color.g), 0.0, 0.999);
-    final_color.b = clamp(linear_to_gamma(final_color.b), 0.0, 0.999);
+    // Hardcoded exposure for HDR tonemapping. Tweaking this adjusts the camera's brightness!
+    let exposure = 1.0; 
+    
+    if (uniforms.is_hdr == 0u) {
+        // Apply ACES HDR tonemapping to bring extreme brightness back into 0-1 range
+        final_color = aces_tonemap(final_color * exposure);
+
+        final_color.r = clamp(linear_to_gamma(final_color.r), 0.0, 0.999);
+        final_color.g = clamp(linear_to_gamma(final_color.g), 0.0, 0.999);
+        final_color.b = clamp(linear_to_gamma(final_color.b), 0.0, 0.999);
+    }
 
     textureStore(tex, tex_coords, vec4<f32>(final_color, 1.0));
 }

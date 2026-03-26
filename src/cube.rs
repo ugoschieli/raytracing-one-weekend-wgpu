@@ -13,6 +13,7 @@ pub enum Material {
     Lambertian(Vec3),
     Metal(Vec3, f32),
     Dielectric(f32),
+    Emissive(Vec3),
 }
 
 #[repr(C)]
@@ -37,6 +38,7 @@ pub struct MaterialUniform {
 pub const MAT_LAMBERTIAN: u32 = 0;
 pub const MAT_METAL: u32 = 1;
 pub const MAT_DIELECTRIC: u32 = 2;
+pub const MAT_EMISSIVE: u32 = 3;
 
 pub struct World {
     pub cubes: Vec<Cube>,
@@ -70,6 +72,16 @@ impl World {
     pub fn to_uniform(&self) -> Vec<CubeUniform> {
         self.cubes.iter().map(|cube| cube.to_uniform()).collect()
     }
+
+    pub fn get_light_indices(&self) -> Vec<u32> {
+        let mut indices = Vec::new();
+        for (i, cube) in self.cubes.iter().enumerate() {
+            if let Material::Emissive(_) = cube.material {
+                indices.push(i as u32);
+            }
+        }
+        indices
+    }
 }
 
 impl Material {
@@ -97,6 +109,14 @@ impl Material {
                 refraction_index: *refraction_index,
                 _pad: 0,
                 albedo: Vec3::ZERO,
+                _pad1: 0,
+            },
+            Material::Emissive(albedo) => MaterialUniform {
+                mat_type: MAT_EMISSIVE,
+                roughness: 0.0,
+                refraction_index: 0.0,
+                _pad: 0,
+                albedo: *albedo,
                 _pad1: 0,
             },
         }

@@ -29,6 +29,7 @@ impl RaytracingPass {
         normal_texture: &Texture,
         depth_texture: &Texture,
         material_texture: &Texture,
+        skybox_texture: &Texture,
     ) -> Self {
         let device = renderer.device();
         let shader = device.create_shader_module(wgpu::include_wgsl!("raytracing.wgsl"));
@@ -38,7 +39,7 @@ impl RaytracingPass {
             renderer.surface_config().width,
             renderer.surface_config().height,
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
         );
 
         let accum_texture = renderer.create_texture_2d(
@@ -52,6 +53,13 @@ impl RaytracingPass {
         let world_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("World Buffer"),
             contents: bytemuck::cast_slice(&world.to_uniform()),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let light_indices = world.get_light_indices();
+        let lights_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Lights Buffer"),
+            contents: bytemuck::cast_slice(&light_indices),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -70,7 +78,7 @@ impl RaytracingPass {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format: wgpu::TextureFormat::Rgba16Float,
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
                     count: None,
@@ -145,6 +153,32 @@ impl RaytracingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -184,6 +218,18 @@ impl RaytracingPass {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&material_texture.view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: lights_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&skybox_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::Sampler(&skybox_texture.sampler),
+                },
             ],
         });
 
@@ -214,10 +260,14 @@ impl RaytracingPass {
             .unwrap()
             .as_secs_f32();
 
+        let is_hdr = if renderer.surface_config().format == wgpu::TextureFormat::Rgba32Float 
+            || renderer.surface_config().format == wgpu::TextureFormat::Rgba16Float { 1 } else { 0 };
+
         let uniforms = Uniforms {
             time,
             frame: *frame_count,
-            _padding: [0, 0],
+            is_hdr,
+            _padding2: 0,
             camera_uniforms,
         };
 

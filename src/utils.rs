@@ -54,7 +54,15 @@ pub(crate) fn configure_surface(
             .get_default_config(adapter, size.width, size.height)
             .expect("Failed to get default surface configuration"),
     );
-    config.format = wgpu::TextureFormat::Bgra8Unorm;
+    let caps = surface.get_capabilities(adapter);
+    if caps.formats.contains(&wgpu::TextureFormat::Rgba32Float) {
+        config.format = wgpu::TextureFormat::Rgba32Float;
+    } else if caps.formats.contains(&wgpu::TextureFormat::Rgba16Float) {
+        config.format = wgpu::TextureFormat::Rgba16Float;
+    } else {
+        config.format = wgpu::TextureFormat::Bgra8Unorm;
+    }
+    // config.format = wgpu::TextureFormat::Bgra8Unorm;
 
     surface.configure(device, &config);
 

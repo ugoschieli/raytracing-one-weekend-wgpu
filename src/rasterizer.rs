@@ -31,7 +31,7 @@ impl RasterizerPass {
             renderer.surface_config().width,
             renderer.surface_config().height,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
         );
 
         let normal_texture = renderer.create_texture_2d(
@@ -147,7 +147,7 @@ impl RasterizerPass {
                 entry_point: Some("fs_main"),
                 targets: &[
                     Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format: wgpu::TextureFormat::Rgba16Float,
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -203,10 +203,14 @@ impl RasterizerPass {
             .unwrap()
             .as_secs_f32();
 
+        let is_hdr = if renderer.surface_config().format == wgpu::TextureFormat::Rgba32Float 
+            || renderer.surface_config().format == wgpu::TextureFormat::Rgba16Float { 1 } else { 0 };
+
         let uniforms = Uniforms {
             time,
             frame: *frame_count,
-            _padding: [0, 0],
+            is_hdr,
+            _padding2: 0,
             camera_uniforms,
         };
 
